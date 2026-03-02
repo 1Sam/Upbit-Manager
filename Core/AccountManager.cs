@@ -10,7 +10,6 @@ using Microsoft.IdentityModel.Tokens;
 using Upbit_Manager.Models.Common;
 using Upbit_Manager.Models.Upbit;
 using Upbit_Manager.UI;
-using Upbit_Manager.Models.Upbit;
 
 namespace Upbit_Manager.Core
 {
@@ -19,6 +18,16 @@ namespace Upbit_Manager.Core
     /// </summary>
     public class AccountManager
     {
+
+        // ⭐ [활용방안]: 자산/평단가 변경 시 UI(그리드, 레이블)를 즉시 갱신하거나 수익률 알람을 트리거하는 데 사용
+        public event Action<string, AssetItem>? OnAssetUpdated;
+
+        // ⭐ [활용방안]: 특정 종목을 전량 매도하여 리스트에서 사라질 때 UI 항목을 제거하거나 리스트를 새로고침하기 위해 사용
+        public event Action<string>? OnAssetRemoved;
+
+        // ⭐ [활용방안]: 전체 자산 동기화가 완료되었을 때 총 평가금액 등을 한꺼번에 업데이트하기 위해 사용
+        public event Action? OnAllAssetsSynced;
+
         #region [ 보안 및 인증 관련 필드 ]
 
         private readonly string _accessKey;

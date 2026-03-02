@@ -20,10 +20,16 @@ namespace Upbit_Manager.Services.Upbit
         private readonly Uri _uri = new Uri("wss://api.upbit.com/websocket/v1");
 
         // 실시간 체결 정보 이벤트 (가격, 거래량, 체결종류, 마켓코드)
+        // ⭐ [활용방안]: 체결 시 사운드 재생, 실시간 체결창 업데이트, 자동매매 엔진의 틱 데이터 입력
         public event Action<double, double, string, string>? OnTradeUpdated;
 
         // ICandleProvider 인터페이스 구현
+
+        // ⭐ [활용방안]: 차트 캔들 실시간 드로잉
         public event Action<OHLC>? OnCandleUpdated;
+
+        // ⭐ [활용방안]: 연결 끊김 시 UI에 '재연결 중' 메시지 표시 및 타이머 일시 정지
+        public event Action<bool>? OnConnectionStatusChanged;
 
         private OHLC? _currentCandle;
         private string? _activeMarket;

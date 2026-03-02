@@ -34,7 +34,7 @@ namespace Upbit_Manager.Controllers
 
         // 시스템 엔진
         private readonly AlarmManager _alarmManager;
-        private readonly GridOrderManager _gridOrderManager;
+        private readonly AlgoOrderManager _algoOrderManager; // [변경] 필드명을 클래스명에 맞춰 변경
 
         // 상태 변수
         private string _selectedMarket = "KRW-ADA";
@@ -56,7 +56,12 @@ namespace Upbit_Manager.Controllers
             _binanceRest = new BinanceRestService();
 
             _alarmManager = new AlarmManager();
-            _gridOrderManager = new GridOrderManager();
+
+            // AlgoOrderManager 초기화 (내부적으로 필요한 OrderManager가 있다면 생성자 주입)
+            // 만약 AlgoOrderManager 생성자가 OrderManager를 요구하도록 수정했다면 아래와 같이 작성합니다.
+             var orderManager = new OrderManager(upbitRest);
+            _algoOrderManager = new AlgoOrderManager(orderManager);
+            //_algoOrderManager = new AlgoOrderManager();
 
             // 1. 웹소켓 실시간 체결 데이터 처리
             _upbitSocket.OnTradeUpdated += HandleRealtimeTrade;
@@ -170,23 +175,24 @@ namespace Upbit_Manager.Controllers
 
         #region [ 자동화 로직 ]
 
+        /// <summary>
+        /// AlgoOrderManager를 활용하여 그리드 매수를 실행합니다.
+        /// </summary>
         public async Task ExecuteBatchPurchase(double startPrice)
         {
             try
             {
-                Logger.Log($"[시스템] {_selectedMarket} | {startPrice:N0}원 기준 일괄 매수 시작...");
-                var gridOrders = new List<GridOrderItem>
-                {
-                    new() { Price = startPrice,         Quantity = 5 },
-                    new() { Price = startPrice * 0.98,  Quantity = 10 },
-                    new() { Price = startPrice * 0.96,  Quantity = 15 },
-                    new() { Price = startPrice * 0.94,  Quantity = 20 }
-                };
-                await _gridOrderManager.ExecuteBatchBuyLimitOrders(_selectedMarket, gridOrders);
+                Logger.Log($"[시스템] {_selectedMarket} | {startPrice:N0}원 기준 그리드 매수 알고리즘 가동...");
+
+                // AlgoOrderManager 내부에 정의된 그리드 생성 로직 활용 (간격 2%, 4단계, 총액 100만 원 예시)
+                var gridOrders = _algoOrderManager.GenerateGrid(startPrice, 2.0, 4, 1000000);
+
+                // 생성된 그리드 주문들을 실행
+                await _algoOrderManager.ExecuteGridOrders(_selectedMarket, gridOrders);
             }
             catch (Exception ex)
             {
-                Logger.Log($"[오류] 일괄 매수 실패: {ex.Message}");
+                Logger.Log($"[오류] 알고리즘 주문 실행 실패: {ex.Message}");
             }
         }
 
@@ -223,8 +229,6 @@ namespace Upbit_Manager.Controllers
 
             if (_currentUpbitCandleSeries != null)
             {
-                // Name 속성이 읽기 전용이므로 생성 시점에 할당할 수 없다면 제거합니다.
-                // 만약 RelativeVolumeAlarm 생성자가 Name을 인자로 받는다면 생성자 수정을 고려해야 합니다.
                 var volAlarm = new RelativeVolumeAlarm(
                     () => _currentUpbitCandleSeries.GetAverageVolume(20),
                     _volAlarmMultiplier
@@ -232,7 +236,6 @@ namespace Upbit_Manager.Controllers
                 {
                     CooldownSeconds = 60,
                     IsDiscordNotify = true
-                    // Name = "거래량 폭발 알람" <- 이 줄을 제거했습니다.
                 };
                 _alarmManager.AddAlarm(volAlarm);
             }

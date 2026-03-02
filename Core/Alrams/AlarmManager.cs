@@ -9,7 +9,11 @@ namespace Upbit_Manager.Core.Alarms
         private readonly List<IAlarmCondition> _alarms = new();
         private readonly object _lock = new();
 
+        // ⭐ [활용방안]: 로그 창에 기록 출력, 텔레그램 메시지 전송, 윈도우 알림 팝업 트리거
         public event Action<IAlarmCondition, double, double>? AlarmTriggered;
+
+        // ⭐ [활용방안]: 알람 목록 UI(리스트박스 등)에서 항목을 추가/삭제 시 동기화하기 위해 사용
+        public event Action? OnAlarmListChanged;
 
         public void AddAlarm(IAlarmCondition alarm)
         {
