@@ -1,49 +1,66 @@
 ﻿using ScottPlot;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using Upbit_Manager.Models.Common;
-using static System.Windows.Forms.LinkLabel;
 using Upbit_Manager.Interfaces;
 
 namespace Upbit_Manager.UI.Series
 {
-    public class BinancePriceLineSeries : ChartSeriesBase
+    /// <summary>
+    /// 바이낸스 실시간 가격을 가져와 지렁이 선으로 표시하고, 업비트 가격과 비교하여 김프를 계산합니다.
+    /// </summary>
+    public class BinancePriceLineSeries : ChartSeriesBase, IChartSeries
     {
+        // ─── 속성 정의 (IChartSeries 구현) ──────────────────────────────────────────
+
         public override ExchangeSource Source => ExchangeSource.Binance;
         public override SeriesType Type => SeriesType.PriceLine;
+
+        // 에러 해결: AxisGroup이 정확히 Upbit_Manager.Models.Common.AxisGroup을 반환하도록 설정
         public override AxisGroup TargetGroup => AxisGroup.Price;
+
         public override string Label => "Binance - 실시간";
         public override bool DefaultOn => false;
 
+        // ─── 데이터 버퍼 및 상태 ──────────────────────────────────────────
 
-        // ⭐ 이 필드가 빠져서 에러가 났던 겁니다!
         private double _lastUpbitPrice = 0;
-
         private const int MAX_BUFFER = 2000;
+
+        // 시간(OADate)과 가격을 쌍으로 저장하는 내부 버퍼
         private readonly List<(double TimeOA, double Price)> _buffer = new();
+
+        // ─── 데이터 업데이트 로직 ──────────────────────────────────────────
 
         public override void UpdateData(object payload)
         {
             lock (_buffer)
             {
-                // 1. [신규] 업비트 실시간 가격 수신 (MainController에서 튜플로 쏜 경우)
+                // 1. 업비트 실시간 가격 수신 (MainController에서 튜플로 전달된 경우)
                 if (payload is ValueTuple<double, ExchangeSource> data && data.Item2 == ExchangeSource.Upbit)
                 {
                     _lastUpbitPrice = data.Item1;
-                    return; // 버퍼에 쌓지 않고 가격만 저장 후 종료
+                    return;
                 }
 
-                // 2. 바이낸스 실시간 가격 수신 (double 단일 값)
+                // 2. 바이낸스 실시간 가격 수신 (단일 double 값)
                 if (payload is double binancePrice)
                 {
+                    // 중복 데이터 방지
                     if (_buffer.Count > 0 && _buffer.Last().Price == binancePrice) return;
                     _buffer.Add((DateTime.Now.ToOADate(), binancePrice));
                 }
                 // 3. 바이낸스 과거 데이터(History) 수신
                 else if (payload is IEnumerable<(DateTime Time, double Price)> history)
                 {
-                    _buffer.AddRange(history.Select(h => (h.Time.ToOADate(), h.Price)));
+                    foreach (var h in history)
+                    {
+                        _buffer.Add((h.Time.ToOADate(), h.Price));
+                    }
                 }
 
-                // 4. 버퍼 사이즈 제한 로직 (기존 로직 유지)
+                // 4. 버퍼 사이즈 제한
                 if (_buffer.Count > MAX_BUFFER)
                 {
                     var lastData = _buffer.OrderBy(x => x.TimeOA).TakeLast(MAX_BUFFER).ToList();
@@ -52,6 +69,8 @@ namespace Upbit_Manager.UI.Series
                 }
             }
         }
+
+        // ─── 렌더링 로직 ──────────────────────────────────────────
 
         public override void Render(Plot plot, IYAxis targetAxis)
         {
@@ -65,6 +84,7 @@ namespace Upbit_Manager.UI.Series
             {
                 if (_buffer.Count < 1) return;
 
+                // 실시간성을 위해 현재 시간까지 선이 이어지도록 마지막 포인트 추가
                 var displayList = _buffer.ToList();
                 lastTimeOA = DateTime.Now.ToOADate();
                 lastBinancePrice = displayList.Last().Price;
@@ -75,7 +95,7 @@ namespace Upbit_Manager.UI.Series
             }
 
             // 1. 김프 계산 및 색상 결정
-            ScottPlot.Color statusColor = Colors.Orange; // 기본값 (1% 미만)
+            ScottPlot.Color statusColor = Colors.Orange;
             string kimpText = "0.00%";
 
             if (_lastUpbitPrice > 0 && lastBinancePrice > 0)
@@ -83,7 +103,7 @@ namespace Upbit_Manager.UI.Series
                 double kimp = ((_lastUpbitPrice / lastBinancePrice) - 1) * 100;
                 kimpText = $"{kimp:+0.00;-0.00;0.00}%";
 
-                // ⭐ 요청하신 조건별 색상 로직
+                // 조건별 색상 로직 적용
                 if (kimp >= 4.0) statusColor = Colors.Red;        // 4% 이상 빨강
                 else if (kimp >= 3.0) statusColor = Colors.Green;  // 3% 이상 녹색
                 else if (kimp >= 2.0) statusColor = Colors.Yellow; // 2% 이상 노랑
@@ -91,20 +111,21 @@ namespace Upbit_Manager.UI.Series
                 else statusColor = Colors.Orange.WithAlpha(0.6);   // 1% 미만 흐린 오렌지
             }
 
-            // 2. 바이낸스 지렁이 선 (결정된 색상 적용)
+            // 2. 바이낸스 가격선 그리기
             var scatter = plot.Add.ScatterLine(xs, ys);
             scatter.Color = statusColor;
             scatter.LineWidth = 2;
             scatter.Axes.YAxis = targetAxis;
 
-            // 3. 김프 레이블 (결정된 색상 적용)
+            // 3. 김프 레이블 표시
             if (_lastUpbitPrice > 0 && lastBinancePrice > 0)
             {
                 var txt = plot.Add.Text(kimpText, lastTimeOA, lastBinancePrice);
 
-                txt.LabelFontName = "Malgun Gothic";
+                txt.LabelFontName = "맑은 고딕";
                 txt.LabelFontSize = 10;
-                txt.LabelFontColor = (statusColor == Colors.Yellow) ? Colors.Black : Colors.White; // 노랑 배경엔 검은 글씨가 잘 보임
+                // 노랑 배경일 때만 검은 글씨 사용
+                txt.LabelFontColor = (statusColor == Colors.Yellow) ? Colors.Black : Colors.White;
                 txt.LabelBackgroundColor = statusColor;
                 txt.LabelPadding = 2;
                 txt.LabelBorderRadius = 3;
@@ -122,6 +143,13 @@ namespace Upbit_Manager.UI.Series
             }
         }
 
-        public override void Clear() { lock (_buffer) _buffer.Clear(); }
+        public override void Clear()
+        {
+            lock (_buffer)
+            {
+                _buffer.Clear();
+                _lastUpbitPrice = 0;
+            }
+        }
     }
 }

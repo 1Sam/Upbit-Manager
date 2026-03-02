@@ -10,6 +10,7 @@ using System.Windows.Forms;
 using Upbit_Manager.Models.Common;
 using Upbit_Manager.UI.Series;
 using UpbitManager.Models.Upbit;
+using Upbit_Manager.Interfaces;
 
 namespace Upbit_Manager.UI
 {
