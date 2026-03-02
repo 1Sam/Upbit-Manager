@@ -6,7 +6,7 @@ namespace Upbit_Manager.Core.Collections
 {
     /// <summary>
     /// 고정된 크기의 순환 버퍼 자료구조입니다.
-    /// 실시간 틱 데이터나 최근 가격 이력을 효율적으로 관리하기 위해 사용됩니다.
+    /// CopyTo 메서드를 통해 Heap 할당 없이 내부 데이터를 배열로 복사할 수 있습니다.
     /// </summary>
     public class RingBuffer<T> : IEnumerable<T>
     {
@@ -29,10 +29,6 @@ namespace Upbit_Manager.Core.Collections
         public int Count => _count;
         public int Capacity => _capacity;
 
-        /// <summary>
-        /// 새로운 아이템을 버퍼에 추가합니다. 
-        /// 버퍼가 가득 차면 가장 오래된 데이터를 덮어씁니다.
-        /// </summary>
         public void Add(T item)
         {
             _buffer[_end] = item;
@@ -48,20 +44,12 @@ namespace Upbit_Manager.Core.Collections
             }
         }
 
-        /// <summary>
-        /// 버퍼의 가장 마지막(가장 최근) 요소를 새 값으로 교체합니다.
-        /// </summary>
         public void UpdateLast(T newItem)
         {
             if (_count == 0) return;
             int lastIndex = (_end - 1 + _capacity) % _capacity;
             _buffer[lastIndex] = newItem;
         }
-
-        /// <summary>
-        /// UpdateLast와 동일한 기능을 수행합니다. (UpbitVolumeSeries 호환용)
-        /// </summary>
-        public void ReplaceLast(T newItem) => UpdateLast(newItem);
 
         public void Clear()
         {
@@ -72,8 +60,29 @@ namespace Upbit_Manager.Core.Collections
         }
 
         /// <summary>
-        /// 가장 최근에 추가된 데이터를 반환합니다.
+        /// ⭐ 핵심 개선: 내부 순환 버퍼의 내용을 대상 배열로 고속 복사합니다. (Heap 할당 없음)
         /// </summary>
+        public int CopyTo(T[] destination)
+        {
+            if (destination == null) throw new ArgumentNullException(nameof(destination));
+            int count = Math.Min(_count, destination.Length);
+            if (count == 0) return 0;
+
+            if (_start + count <= _capacity)
+            {
+                // 데이터가 끊기지 않고 연속된 경우
+                Array.Copy(_buffer, _start, destination, 0, count);
+            }
+            else
+            {
+                // 데이터가 끝부분에서 다시 처음으로 돌아가는 경우 (Wrap-around)
+                int firstPart = _capacity - _start;
+                Array.Copy(_buffer, _start, destination, 0, firstPart);
+                Array.Copy(_buffer, 0, destination, firstPart, count - firstPart);
+            }
+            return count;
+        }
+
         public T Last
         {
             get
@@ -92,14 +101,8 @@ namespace Upbit_Manager.Core.Collections
             }
         }
 
-        IEnumerator IEnumerable.GetEnumerator()
-        {
-            return GetEnumerator();
-        }
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
-        /// <summary>
-        /// 인덱스를 통해 데이터에 접근합니다 (0이 가장 오래된 데이터).
-        /// </summary>
         public T this[int index]
         {
             get
