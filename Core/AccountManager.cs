@@ -10,7 +10,7 @@ using Microsoft.IdentityModel.Tokens;
 using Upbit_Manager.Models.Common;
 using Upbit_Manager.Models.Upbit;
 using Upbit_Manager.UI;
-using UpbitManager.Models.Upbit;
+using Upbit_Manager.Models.Upbit;
 
 namespace Upbit_Manager.Core
 {

@@ -1,7 +1,7 @@
 ﻿// 파일명: UpbitOpenOrder.cs
 using System.Text.Json.Serialization;
 
-namespace UpbitManager.Models.Upbit
+namespace Upbit_Manager.Models.Upbit
 {
     public class UpbitOpenOrder
     {

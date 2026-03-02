@@ -2,7 +2,7 @@
 using System.Linq;
 using ScottPlot;
 using Upbit_Manager.Models.Common;
-using UpbitManager.Models.Upbit;
+using Upbit_Manager.Models.Upbit;
 
 namespace Upbit_Manager.UI.Series
 {

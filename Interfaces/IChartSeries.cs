@@ -1,6 +1,5 @@
 ﻿using ScottPlot;
-using Upbit_Manager.Models.Common; // 기존에 정의된 AxisGroup, ExchangeSource, SeriesType을 사용
-using Upbit_Manager.Interfaces;
+using Upbit_Manager.Models.Common;
 
 namespace Upbit_Manager.Interfaces
 {
@@ -9,14 +8,35 @@ namespace Upbit_Manager.Interfaces
     /// </summary>
     public interface IChartSeries
     {
+        /// <summary>
+        /// 데이터의 출처 (Upbit, Binance 등)
+        /// </summary>
         ExchangeSource Source { get; }
+
+        /// <summary>
+        /// 시리즈의 종류 (Candle, Volume, PriceLine 등)
+        /// </summary>
         SeriesType Type { get; }
 
-        // Models.Common에 정의된 AxisGroup을 사용합니다.
+        /// <summary>
+        /// 차트 내에서 어느 축(영역)에 그려질지를 결정하는 그룹입니다.
+        /// Models.Common.AxisGroup (Price, Volume 등)을 사용합니다.
+        /// </summary>
         AxisGroup TargetGroup { get; }
 
+        /// <summary>
+        /// UI(체크박스 리스트 등)에 표시될 명칭
+        /// </summary>
         string Label { get; }
+
+        /// <summary>
+        /// 프로그램 시작 시 기본적으로 체크(활성화)되어 있을지 여부
+        /// </summary>
         bool DefaultOn { get; }
+
+        /// <summary>
+        /// 현재 차트상에 표시되고 있는지 여부
+        /// </summary>
         bool IsVisible { get; set; }
 
         /// <summary>

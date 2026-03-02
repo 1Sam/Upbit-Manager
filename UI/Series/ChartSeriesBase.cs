@@ -1,5 +1,6 @@
 ﻿using ScottPlot;
 using Upbit_Manager.Models.Common;
+using Upbit_Manager.Interfaces;
 
 namespace Upbit_Manager.UI.Series
 {

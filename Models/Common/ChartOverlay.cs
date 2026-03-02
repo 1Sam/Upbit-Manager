@@ -8,6 +8,13 @@ namespace Upbit_Manager.Models.Common
         Binance,
     }
 
+    public enum AxisGroup
+    {
+        Price,   // 상단 가격 영역
+        Volume,  // 하단 거래량 영역
+        Indicator // (선택 사항) 보조 지표 영역
+    }
+
     public enum SeriesType
     {
         [System.ComponentModel.Description("캔들")]

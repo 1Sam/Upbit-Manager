@@ -15,8 +15,8 @@ using Upbit_Manager.Services.Upbit;
 using Upbit_Manager.UI;
 using Upbit_Manager.UI.Series;
 using Upbit_Manager.Core;
-using UpbitManager.Models.Upbit;
-//using UpbitManager.UI;
+using Upbit_Manager.Models.Upbit;
+//using Upbit_Manager.UI;
 
 namespace Upbit_Manager
 {

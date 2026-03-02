@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using Upbit_Manager.Models.Common;
 
-namespace UpbitManager.Models.Upbit
+namespace Upbit_Manager.Models.Upbit
 {
     /// <summary>
     /// 업비트 실시간 체결 데이터를 전달하기 위한 페이로드.
