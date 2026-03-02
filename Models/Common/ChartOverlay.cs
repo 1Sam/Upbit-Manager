@@ -24,6 +24,15 @@ namespace Upbit_Manager.Models.Common
 
         [System.ComponentModel.Description("가격선")]
         PriceLine,
+
+        [System.ComponentModel.Description("평단가선")]
+        AvgPriceLine,
+
+        [System.ComponentModel.Description("가상평단가선")]
+        SimulatedAvgPriceLine,
+
+        [System.ComponentModel.Description("볼륨알람선")]
+        VolumeLimit,
     }
 
     public class ChartSeriesItem

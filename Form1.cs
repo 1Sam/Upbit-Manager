@@ -1,4 +1,11 @@
-﻿using Upbit_Manager.Controllers;
+﻿using ScottPlot.WinForms;
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using Upbit_Manager.Controllers;
 using Upbit_Manager.Core;
 using Upbit_Manager.Interfaces;
 using Upbit_Manager.Models.Common;
@@ -7,6 +14,7 @@ using Upbit_Manager.Services.Common;
 using Upbit_Manager.Services.Upbit;
 using Upbit_Manager.UI;
 using Upbit_Manager.UI.Series;
+using UpbitManager.Models.Upbit;
 
 namespace Upbit_Manager
 {
@@ -15,8 +23,6 @@ namespace Upbit_Manager
         private readonly MainController _controller;
         private readonly AccountManager _accountManager;
         private readonly ChartManager _chartManager;
-        private readonly UpbitEngine _upbitEngine;
-        private readonly BinanceEngine _binanceEngine;
         private readonly UpbitRestService _upbitRestService;
         private readonly ExchangeRateService _rateService;
 
@@ -27,14 +33,13 @@ namespace Upbit_Manager
         {
             InitializeComponent();
 
-            // ── API 키 초기 설정 ───────────────────────────────────────
+            // 1. API 키 초기 설정 (저장된 키 로드)
             var startupKeys = ApiKeyStore.ReadKeys();
             if (startupKeys == null)
             {
                 if (!ShowApiKeyDialog())
                 {
-                    MessageBox.Show("API 키가 필요합니다. 프로그램을 종료합니다.",
-                                    "종료", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show("API 키가 필요합니다. 프로그램을 종료합니다.");
                     Application.Exit();
                     return;
                 }
@@ -45,253 +50,95 @@ namespace Upbit_Manager
                 ApiConfig.SecretKey = startupKeys.Value.secret;
             }
 
-            // DataGridView 더블버퍼링 (깜빡임 방지)
+            // 2. DataGridView 더블버퍼링 (깜빡임 방지)
             typeof(DataGridView).GetProperty("DoubleBuffered",
-                System.Reflection.BindingFlags.Instance |
-                System.Reflection.BindingFlags.NonPublic)
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
                 ?.SetValue(dataGridView1, true, null);
 
-            // ── 핵심 객체 초기화 ───────────────────────────────────────
+            // 3. 핵심 객체 초기화
             _accountManager = new AccountManager();
             _chartManager = new ChartManager(formsPlot1);
             _rateService = new ExchangeRateService();
-            _upbitEngine = new UpbitEngine(_accountManager);
-            _binanceEngine = new BinanceEngine();
             _upbitRestService = new UpbitRestService(ApiConfig.AccessKey, ApiConfig.SecretKey);
-            _controller = new MainController(_upbitRestService, _rateService,
-                                                   _accountManager, _chartManager);
 
-            // ── 이벤트 연결 ───────────────────────────────────────────
-            _upbitEngine.OnTradeUpdated += (price, vol, side, market) =>
-            {
-                if (this.InvokeRequired)
-                {
-                    this.Invoke(() => {
-                        _controller.HandleRealtimeTrade(price, vol, side, market);
+            // ⭐ 컨트롤러 생성 (모든 엔진 제어권 포함)
+            _controller = new MainController(_upbitRestService, _rateService, _accountManager, _chartManager);
 
-                        // 핵심: market이 USDT일 때 ChartManager의 새 메서드 호출!
-                        if (market == "KRW-USDT")
-                            _chartManager.UpdateUsdtPrice(price);
-                    });
-                }
-                else
-                {
-                    _controller.HandleRealtimeTrade(price, vol, side, market);
-                    if (market == "KRW-USDT") _chartManager.UpdateUsdtPrice(price);
-                }
-            };
-
-            // 바이낸스 실시간 가격 → ChartManager (항상 수집, 표시는 IsVisible로 제어)
-            _binanceEngine.OnPriceUpdated += (krwPrice) =>
-            {
-                if (this.InvokeRequired)
-                    this.Invoke(() => _chartManager.UpdateBinancePrice(krwPrice));
-                else
-                    _chartManager.UpdateBinancePrice(krwPrice);
-            };
-
+            // 4. 컨트롤러 -> UI 이벤트 연결
             _controller.OnExchangeRateUpdated = (rate) =>
             {
-                if (statusStrip1.InvokeRequired)
-                    statusStrip1.Invoke(() => UpdateRateLabel(rate));
-                else
-                    UpdateRateLabel(rate);
+                this.InvokeIfRequired(() => UpdateRateLabel(rate));
+            };
+
+            // ⭐ [추가] 알람 통계 수치 업데이트 이벤트 연결 (Label 이름 매칭: lblCurrentAvg, lblTargetVol)
+            _controller.OnVolumeStatsUpdated = (avg, threshold) =>
+            {
+                this.InvokeIfRequired(() => {
+                    lblCurrentAvg.Text = $"현재 20분 평균: {avg:N0}";
+                    lblTargetVol.Text = $"알람 기준량: {threshold:N0}";
+                });
             };
 
             Logger.OnLogAdded += (logLine) =>
             {
-                if (this.InvokeRequired) this.Invoke(() => UpdateLogTextBox(logLine));
-                else UpdateLogTextBox(logLine);
+                this.InvokeIfRequired(() => UpdateLogTextBox(logLine));
             };
 
+            // 5. 폼 공통 이벤트 핸들러 등록
             this.FormClosing += Form1_FormClosing;
-            toolStripStatusLabel1.Click += toolStripStatusLabel1_Click;
-            toolStripStatusLabel1.DoubleClick += toolStripStatusLabel1_DoubleClick;
+            this.toolStripStatusLabel1.Click += toolStripStatusLabel1_Click;
+            this.toolStripStatusLabel1.DoubleClick += toolStripStatusLabel1_DoubleClick;
 
-            // ── UI 초기화 ──────────────────────────────────────────────
+            // 6. UI 초기화 및 타이머 시작
             SetupDataGridView();
             InitLogDisplay();
-
-            // 체크리스트 초기화 (chkBinance 대체)
             InitChartSeriesList();
+            SetupTimers();
+            SetupAlarmControlHandlers(); // ⭐ 알람 컨트롤 이벤트 바인딩 추가
 
-            // ── 타이머 ─────────────────────────────────────────────────
-            // UI 갱신 (100ms)
-            var uiTimer = new System.Windows.Forms.Timer { Interval = 300 };
-            uiTimer.Tick += (s, e) =>
-            {
-                _chartManager.UpdateUI();
-                UpdateAssetLabels();
-            };
+            // 7. 프로그램 초기 로직 실행
+            InitProgram();
+        }
+
+        #region [초기화 및 시스템 설정]
+
+        private void SetupTimers()
+        {
+            // 차트 UI 갱신 (100ms)
+            var uiTimer = new System.Windows.Forms.Timer { Interval = 100 };
+            uiTimer.Tick += (s, e) => _chartManager.UpdateUI();
             uiTimer.Start();
 
             // 데이터 갱신 (500ms)
             var mainDataTimer = new System.Windows.Forms.Timer { Interval = 500 };
-            mainDataTimer.Tick += MainUpdateTimer_Tick; // ← flowToolStripMenuItem_DoubleClick 에서 변경
+            mainDataTimer.Tick += async (s, e) => await DoMainUpdate();
             mainDataTimer.Start();
-
-            InitProgram();
         }
 
-        // ── 체크리스트 초기화 ──────────────────────────────────────────
-
-        /// <summary>
-        /// ChartManager에 등록된 시리즈 목록을 CheckedListBox에 자동 바인딩합니다.
-        /// 새 시리즈는 ChartManager._seriesList에만 추가하면 여기도 자동 반영됩니다.
-        /// </summary>
         private void InitChartSeriesList()
         {
             checkedListBox_ChartSeries.Items.Clear();
-
             foreach (var series in _chartManager.SeriesList)
+            {
                 checkedListBox_ChartSeries.Items.Add(series, series.DefaultOn);
-
-            checkedListBox_ChartSeries.ItemCheck += OnChartSeriesItemCheck;
-        }
-
-        /// <summary>
-        /// 체크 상태 변경 시 MainController를 통해 시리즈 표시 여부를 토글합니다.
-        /// 바이낸스 항목이 켜지면 히스토리 로드 + 엔진 시작도 함께 처리합니다.
-        /// </summary>
-        private async void OnChartSeriesItemCheck(object sender, ItemCheckEventArgs e)
-        {
-            if (checkedListBox_ChartSeries.Items[e.Index] is not IChartSeries series) return;
-
-            bool isChecked = e.NewValue == CheckState.Checked;
-
-            // 1. 차트 표시 여부 토글
-            _controller.ToggleSeries(series.Source, series.Type, isChecked);
-
-            // 2. 바이낸스 가격선 전용 처리 (엔진 시작/중지)
-            if (series.Source == ExchangeSource.Binance && series.Type == SeriesType.PriceLine)
-            {
-                await HandleBinanceToggle(isChecked);
             }
-        }
 
-        /// <summary>
-        /// 바이낸스 엔진 시작/중지 및 히스토리 로드를 처리합니다.
-        /// 기존 chkBinance_CheckedChanged 로직을 이전한 것입니다.
-        /// </summary>
-        private async Task HandleBinanceToggle(bool isChecked)
-        {
-            if (isChecked)
+            checkedListBox_ChartSeries.ItemCheck += async (s, e) =>
             {
-                // 환율 가져오기
-                double rate = await _rateService.GetUsdToKrwAsync();
-
-                // 과거 히스토리 먼저 로드
-                string currentMarket = _controller.GetSelectedMarket();
-                var history = await _controller.GetBinanceHistoryAsync(currentMarket, rate);
-                _chartManager.UpdateBinanceHistory(history);
-
-                // 실시간 엔진 시작
-                await _binanceEngine.StartAsync(currentMarket, rate);
-
-                Logger.Log($"바이낸스 시세 연동 시작 (적용환율: {rate:N2})");
-            }
-            else
-            {
-                // 엔진 중지 + 버퍼 초기화
-                await _binanceEngine.StopAsync();
-                _chartManager.ClearBinanceSeries();
-
-                Logger.Log("바이낸스 시세 연동 종료");
-            }
-        }
-
-        // ── API 키 입력 다이얼로그 ─────────────────────────────────────
-
-        /// <summary>API 키 입력 다이얼로그를 표시하고 저장합니다.</summary>
-        private bool ShowApiKeyDialog(string title = "API Key 입력 (초기설정)")
-        {
-            using var dlg = new Form
-            {
-                Text = title,
-                Size = new System.Drawing.Size(420, 180),
-                StartPosition = FormStartPosition.CenterParent
-            };
-
-            var txtA = new TextBox { Location = new System.Drawing.Point(110, 10), Width = 280 };
-            var txtS = new TextBox
-            {
-                Location = new System.Drawing.Point(110, 40),
-                Width = 280,
-                UseSystemPasswordChar = true
-            };
-            var btnOk = new Button
-            {
-                Text = "저장",
-                Location = new System.Drawing.Point(110, 80),
-                DialogResult = DialogResult.OK
-            };
-            var btnCan = new Button
-            {
-                Text = "취소",
-                Location = new System.Drawing.Point(200, 80),
-                DialogResult = DialogResult.Cancel
-            };
-
-            dlg.Controls.AddRange(new Control[]
-            {
-                new Label { Text = "Access Key:", Location = new System.Drawing.Point(10, 10) }, txtA,
-                new Label { Text = "Secret Key:", Location = new System.Drawing.Point(10, 40) }, txtS,
-                btnOk, btnCan
-            });
-            dlg.AcceptButton = btnOk;
-            dlg.CancelButton = btnCan;
-
-            if (dlg.ShowDialog() != DialogResult.OK) return false;
-
-            ApiKeyStore.SaveKeys(txtA.Text.Trim(), txtS.Text.Trim());
-            ApiConfig.AccessKey = txtA.Text.Trim();
-            ApiConfig.SecretKey = txtS.Text.Trim();
-            return true;
-        }
-
-        // ── 나머지 기존 코드 (변경 없음) ──────────────────────────────
-
-
-
-        #region [상태 표시줄 및 IP 복사]
-
-        private void toolStripStatusLabel1_Click(object sender, EventArgs e) => HandleStatusLabelInteraction();
-        private void toolStripStatusLabel1_DoubleClick(object sender, EventArgs e) => HandleStatusLabelInteraction();
-
-        private void HandleStatusLabelInteraction()
-        {
-            string statusText = toolStripStatusLabel1.Text;
-            var match = System.Text.RegularExpressions.Regex
-                .Match(statusText, @"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}");
-            if (!match.Success) return;
-
-            Clipboard.SetText(match.Value);
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                if (checkedListBox_ChartSeries.Items[e.Index] is IChartSeries series)
                 {
-                    FileName = "https://upbit.com/mypage/open_api_management",
-                    UseShellExecute = true
-                });
-            }
-            catch { }
+                    bool isChecked = (e.NewValue == CheckState.Checked);
+                    series.IsVisible = isChecked;
 
-            string originalText = toolStripStatusLabel1.Text;
-            toolStripStatusLabel1.Text = $"[복사완료 & 페이지오픈] {match.Value}";
+                    if (series.Source == ExchangeSource.Binance && series.Type == SeriesType.PriceLine)
+                    {
+                        await _controller.ToggleBinanceService(isChecked);
+                    }
 
-            var timer = new System.Windows.Forms.Timer { Interval = 2000 };
-            timer.Tick += (s, ev) =>
-            {
-                toolStripStatusLabel1.Text = originalText;
-                timer.Stop();
-                timer.Dispose();
+                    _chartManager.UpdateUI();
+                }
             };
-            timer.Start();
         }
-
-        #endregion
-
-        #region [자산 관리 및 그리드 업데이트]
 
         private void SetupDataGridView()
         {
@@ -307,21 +154,121 @@ namespace Upbit_Manager
             dataGridView1.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
             dataGridView1.RowHeadersVisible = false;
             dataGridView1.AllowUserToAddRows = false;
+        }
 
-            dataGridView1.CellDoubleClick += async (s, e) =>
-            {
-                if (e.RowIndex < 0) return;
-                var cell = dataGridView1.Rows[e.RowIndex].Cells["CoinName"].Value;
-                if (cell == null) return;
-                string m = cell.ToString();
-                await _controller.ChangeMarket(m.Contains("-") ? m : $"KRW-{m}");
+        /// <summary>
+        /// ⭐ 알람 설정 UI 컨트롤들의 이벤트 핸들러를 설정합니다.
+        /// </summary>
+        private void SetupAlarmControlHandlers()
+        {
+            // 배수 설정 변경 시
+            numVolMultiplier.ValueChanged += (s, e) => {
+                Logger.Log($"[설정] 거래량 감시 배수 변경: {numVolMultiplier.Value}배");
+                // 필요한 경우 컨트롤러를 통해 엔진에 즉시 반영하는 로직 추가 가능
             };
+
+            // 쿨타임 트랙바 변경 시
+            trkbCooldown.Scroll += (s, e) => {
+                lblCooldownValue.Text = $"{trkbCooldown.Value}초"; // 가이드 라벨이 있다면 업데이트
+            };
+
+            // 알람 활성화 체크박스
+            chkAlarmEnable.CheckedChanged += (s, e) => {
+                string status = chkAlarmEnable.Checked ? "활성화" : "비활성화";
+                Logger.Log($"[설정] 실시간 알람 엔진 {status}");
+            };
+        }
+
+        #endregion
+
+        #region [데이터 갱신 루프]
+        private bool _isApiValid = true;
+        private async void InitProgram()
+        {
+            toolStripStatusLabel1.Text = "API 인증 확인 중...";
+            toolStripStatusLabel1.ForeColor = Color.Black;
+
+            string result = await _controller.InitializeProgram();
+
+            if (result == "SUCCESS")
+            {
+                _isApiValid = true;
+                toolStripStatusLabel1.Text = "API 인증 및 초기화 성공";
+                toolStripStatusLabel1.ForeColor = Color.Blue;
+            }
+            else
+            {
+                _isApiValid = false;
+                toolStripStatusLabel1.Text = result;
+                toolStripStatusLabel1.ForeColor = Color.Red;
+                toolStripStatusLabel1.ToolTipText = "클릭하면 현재 IP를 복사하고 업비트 관리 페이지로 이동합니다.";
+            }
+        }
+
+        private async Task DoMainUpdate()
+        {
+            if (!_isApiValid) return;
+
+            if ((DateTime.Now - _lastFullUpdateTime).TotalSeconds >= 2)
+            {
+                try
+                {
+                    string assetJson = await _upbitRestService.GetAccountsJsonAsync();
+
+                    if (assetJson.StartsWith("ERROR_MSG:"))
+                    {
+                        _isApiValid = false;
+                        this.InvokeIfRequired(() =>
+                        {
+                            toolStripStatusLabel1.Text = assetJson.Replace("ERROR_MSG:", "");
+                            toolStripStatusLabel1.ForeColor = Color.Red;
+                        });
+                        return;
+                    }
+
+                    _accountManager.UpdateAssetsFromJson(assetJson);
+
+                    string orderJson = await _upbitRestService.GetOpenOrdersJsonAsync();
+                    if (!orderJson.StartsWith("ERROR_MSG:"))
+                    {
+                        _accountManager.UpdateOpenOrders(orderJson);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Update Error: {ex.Message}");
+                }
+                _lastFullUpdateTime = DateTime.Now;
+            }
+
+            UpdateAssetLabels();
+            UpdateChartLayers();
+        }
+
+        private void UpdateChartLayers()
+        {
+            if (_accountManager == null || _chartManager == null) return;
+
+            var myOrders = _accountManager.GetOpenOrdersByMarket(_currentMarket);
+            _chartManager.PushData(SeriesType.OpenOrder, myOrders, ExchangeSource.Upbit);
+
+            var asset = _accountManager.GetAssetByMarket(_currentMarket);
+            if (asset != null)
+            {
+                var payload = new AccountInfoPayload(asset.AvgBuyPrice, asset.ProfitRate);
+                _chartManager.PushData(SeriesType.AvgPriceLine, payload, ExchangeSource.Upbit);
+            }
+            else
+            {
+                _chartManager.PushData(SeriesType.AvgPriceLine, new AccountInfoPayload(0, 0), ExchangeSource.Upbit);
+            }
         }
 
         private void UpdateAssetLabels()
         {
             if (!this.IsHandleCreated) return;
-            this.Invoke(() =>
+
+            this.InvokeIfRequired(() =>
             {
                 _accountManager.MyAssets.TryGetValue("KRW", out var krw);
                 string currentSymbol = _currentMarket?.Split('-').LastOrDefault() ?? "ADA";
@@ -331,137 +278,55 @@ namespace Upbit_Manager
                 double pureCash = krw?.TotalInventory ?? 0;
 
                 lblCashTotal.Text = $"총 보유자산: {totalEval + pureCash:N0} KRW (평가: {totalEval:N0})";
-                lblCashAvailable.Text = $"Cash : {krw?.TotalInventory:N0} KRW";
-                lblCashLocked.Text = $"in BID : {(totalEval + pureCash - (krw?.TotalInventory ?? 0)):N0} KRW";
+                lblCashAvailable.Text = $"Cash : {pureCash:N0} KRW";
 
                 if (coinAsset != null)
                 {
                     lblAdaBalance.Text = $"보유 수량: {coinAsset.TotalInventory:N4} {currentSymbol}";
-                    lblAdaLocked.Text = $"매도 대기: - {currentSymbol}";
-                    lblAdaInventory.Text = $"총 보유량: {coinAsset.TotalInventory:N4} {currentSymbol}";
                     lblAdaAvg.Text = $"매수평단: {coinAsset.AvgBuyPrice:N2} KRW";
                     lblAdaProfitRate.Text = $"수익률: {coinAsset.ProfitRate:N2}%";
                     lblAdaProfitLoss.Text = $"평가손익: {coinAsset.ProfitLoss:N0} KRW";
 
-                    var color = coinAsset.ProfitRate >= 0
-                        ? System.Drawing.Color.Red
-                        : System.Drawing.Color.Blue;
+                    var color = coinAsset.ProfitRate >= 0 ? Color.Red : Color.Blue;
                     lblAdaProfitRate.ForeColor = color;
                     lblAdaProfitLoss.ForeColor = color;
                 }
 
-                var displayAssets = _accountManager.MyAssets.Values
-                    .Where(a => a.Symbol != "KRW")
-                    .OrderByDescending(a => a.EvaluationAmount)
-                    .ToList();
-
-                dataGridView1.SuspendLayout();
-                if (dataGridView1.Rows.Count != displayAssets.Count)
-                {
-                    dataGridView1.Rows.Clear();
-                    foreach (var _ in displayAssets) dataGridView1.Rows.Add();
-                }
-
-                for (int i = 0; i < displayAssets.Count; i++)
-                {
-                    var asset = displayAssets[i];
-                    var row = dataGridView1.Rows[i];
-                    row.Cells[0].Value = asset.Symbol;
-                    row.Cells[1].Value = $"{asset.TotalInventory:N4}";
-                    row.Cells[2].Value = $"{asset.AvgBuyPrice:N2}";
-                    row.Cells[3].Value = $"{asset.TotalBuyAmount:N0}";
-                    row.Cells[4].Value = $"{asset.EvaluationAmount:N0}";
-                    row.Cells[5].Value = $"{asset.ProfitRate:+0.00;-0.00;0.00}%";
-                    row.Cells[6].Value = $"{asset.ProfitLoss:+N0;-N0;0}";
-
-                    row.DefaultCellStyle.ForeColor =
-                        asset.ProfitRate > 0 ? System.Drawing.Color.Red :
-                        asset.ProfitRate < 0 ? System.Drawing.Color.Blue :
-                                               System.Drawing.Color.Black;
-                }
-                dataGridView1.ResumeLayout();
+                SyncAssetDataGridView();
             });
         }
 
-        #endregion
-
-        #region [시스템 제어 및 로그]
-
-        private async void InitProgram()
+        private void SyncAssetDataGridView()
         {
-            toolStripStatusLabel1.Text = "API 인증 확인 중...";
-            var authResult = await _upbitEngine.CheckAuthAsync();
-            toolStripStatusLabel1.Text = authResult.message;
-            toolStripStatusLabel1.ForeColor = authResult.isSuccess
-                ? System.Drawing.Color.Blue
-                : System.Drawing.Color.Red;
+            var displayAssets = _accountManager.MyAssets.Values
+                .Where(a => a.Symbol != "KRW")
+                .OrderByDescending(a => a.EvaluationAmount).ToList();
 
-            if (authResult.isSuccess)
+            if (dataGridView1.Rows.Count != displayAssets.Count)
             {
-                await _controller.InitializeProgram();
-                string[] myMarkets = _accountManager.GetSubscribingMarkets();
-                if (!myMarkets.Contains("KRW-ADA"))
-                    myMarkets = myMarkets.Append("KRW-ADA").ToArray();
-                // Ensure KRW-USDT is subscribed so the USDT price line receives realtime ticks
-                if (!myMarkets.Contains("KRW-USDT"))
-                    myMarkets = myMarkets.Append("KRW-USDT").ToArray();
-                Logger.Log($"WebSocket subscribing markets: {string.Join(',', myMarkets)}");
-                _ = Task.Run(() => _upbitEngine.RunWebSocketLoopAsync(myMarkets));
+                dataGridView1.Rows.Clear();
+                foreach (var _ in displayAssets) dataGridView1.Rows.Add();
             }
-        }
 
-        private void InitLogDisplay() => textBox1.Lines = Logger.GetLastLogs(20).ToArray();
-        private void UpdateRateLabel(double rate)
-        {
-            toolStripStatusLabel2.Text = $"현재 환율: {rate:N2} KRW/USD";
-            toolStripStatusLabel2.ForeColor = Color.DarkBlue;
-        }
+            for (int i = 0; i < displayAssets.Count; i++)
+            {
+                var asset = displayAssets[i];
+                var row = dataGridView1.Rows[i];
+                row.Cells[0].Value = asset.Symbol;
+                row.Cells[1].Value = $"{asset.TotalInventory:N4}";
+                row.Cells[2].Value = $"{asset.AvgBuyPrice:N2}";
+                row.Cells[3].Value = $"{asset.TotalBuyAmount:N0}";
+                row.Cells[4].Value = $"{asset.EvaluationAmount:N0}";
+                row.Cells[5].Value = $"{asset.ProfitRate:N2}%";
+                row.Cells[6].Value = $"{asset.ProfitLoss:N0}";
 
-        private void UpdateLogTextBox(string newLog)
-        {
-            var lines = textBox1.Lines.ToList();
-            lines.Insert(0, newLog);
-            if (lines.Count > 20) lines = lines.Take(20).ToList();
-            textBox1.Lines = lines.ToArray();
-        }
-
-        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
-        {
-            _upbitEngine.StopWebSocket();
-            Logger.Log("프로그램을 종료합니다.");
+                row.DefaultCellStyle.ForeColor = asset.ProfitRate >= 0 ? Color.Red : Color.Blue;
+            }
         }
 
         #endregion
 
-        #region [타이머 및 차트 갱신]
-
-
-        private async Task RefreshHeavyData()
-        {
-            try
-            {
-                string assetJson = await _upbitRestService.GetAccountsJsonAsync();
-                _accountManager.UpdateAssetsFromJson(assetJson);
-
-                string orderJson = await _upbitRestService.GetOpenOrdersJsonAsync();
-                _accountManager.UpdateOpenOrders(orderJson);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"데이터 갱신 오류: {ex.Message}");
-            }
-        }
-
-        private void UpdateChartLayers()
-        {
-            if (_accountManager == null || _chartManager == null) return;
-            var myOrders = _accountManager.GetOpenOrdersByMarket(_currentMarket);
-            _chartManager.UpdateMyOrders(myOrders);
-        }
-
-        #endregion
-
-        #region [DataGridView 이벤트]
+        #region [컴포넌트 이벤트 핸들러]
 
         private void dataGridView1_CellClick(object sender, DataGridViewCellEventArgs e)
         {
@@ -476,54 +341,183 @@ namespace Upbit_Manager
             UpdateChartLayers();
         }
 
-        private void dataGridView1_CellContentClick(object sender, DataGridViewCellEventArgs e) { }
+        private async void btnExecuteBatch_Click(object sender, EventArgs e)
+        {
+            var asset = _accountManager.GetAssetByMarket(_currentMarket);
+            double currentPrice = asset?.CurrentPrice ?? 0;
 
-        #endregion
-        private void Form1_Load(object sender, EventArgs e) { }
-        private void textBox1_TextChanged(object sender, EventArgs e) { }
+            if (currentPrice <= 0)
+            {
+                MessageBox.Show("현재가를 불러올 수 없습니다.");
+                return;
+            }
 
+            if (MessageBox.Show($"{_currentMarket} 종목을 현재가 {currentPrice:N0}원 기준으로 일괄 매수(그리드) 하시겠습니까?", "일괄 매수 확인", MessageBoxButtons.YesNo) == DialogResult.Yes)
+            {
+                await _controller.ExecuteBatchPurchase(currentPrice);
+            }
+        }
 
+        private void btnApplySimulation_Click(object sender, EventArgs e)
+        {
+            if (!double.TryParse(txtSimulateCash.Text, out double addCash) || addCash <= 0)
+            {
+                MessageBox.Show("추가 투입할 금액을 숫자로 입력해주세요.");
+                return;
+            }
+
+            var asset = _accountManager.GetAssetByMarket(_currentMarket);
+            if (asset == null || asset.TotalInventory <= 0)
+            {
+                MessageBox.Show("보유 중인 자산이 없어 계산이 불가능합니다.");
+                return;
+            }
+
+            double currentPrice = asset.CurrentPrice;
+            if (currentPrice <= 0) return;
+
+            double addedQty = addCash / currentPrice;
+            double expectedAvg = (asset.TotalBuyAmount + addCash) / (asset.TotalInventory + addedQty);
+
+            _chartManager.PushData(SeriesType.SimulatedAvgPriceLine, expectedAvg, ExchangeSource.Upbit);
+            lblExpectedAvg.Text = $"예상 평단: {expectedAvg:N2}";
+
+            for (int i = 0; i < checkedListBox_ChartSeries.Items.Count; i++)
+            {
+                if (checkedListBox_ChartSeries.Items[i] is UpbitSimulateSeries)
+                {
+                    checkedListBox_ChartSeries.SetItemChecked(i, true);
+                    break;
+                }
+            }
+        }
 
         private void toolStripMenuItem2_Click(object sender, EventArgs e)
         {
-            ShowApiKeyDialog("API Key 입력");
+            ShowApiKeyDialog("API Key 수정");
         }
 
-
-        private void toolStripComboBox1_Click(object sender, EventArgs e)
+        private void flowToolStripMenuItem_Click(object sender, EventArgs e)
         {
-
+            _chartManager.ResetTimelineOnly();
+            formsPlot1.Focus();
         }
 
-        private void checkedListBox_ChartSeries_SelectedIndexChanged(object sender, EventArgs e)
+        private void UpdateRateLabel(double rate)
         {
-
+            toolStripStatusLabel2.Text = $"현재 환율: {rate:N2} KRW/USD";
         }
 
-
-
-        // 타이머 전용 핸들러 (신규 추가)
-        private async void MainUpdateTimer_Tick(object sender, EventArgs e)
+        private void UpdateLogTextBox(string newLog)
         {
-            await DoMainUpdate();
+            var lines = textBox1.Lines.ToList();
+            lines.Insert(0, newLog);
+            if (lines.Count > 20) lines = lines.Take(20).ToList();
+            textBox1.Lines = lines.ToArray();
         }
 
-        // 공통 로직 (신규 추가)
-        private async Task DoMainUpdate()
+        private void InitLogDisplay()
         {
-            if ((DateTime.Now - _lastFullUpdateTime).TotalSeconds >= 2)
+            textBox1.Clear();
+
+            // 1. 내 문서 폴더에서 최신 로그 10개 불러오기
+            var oldLogs = Logger.GetLastLogs(10);
+
+            if (oldLogs.Count > 0)
             {
-                await RefreshHeavyData();
-                _lastFullUpdateTime = DateTime.Now;
+                // 최신순으로 가져왔으므로 그대로 표시
+                textBox1.Lines = oldLogs.ToArray();
+                Logger.Log("이전 로그 기록을 불러왔습니다.");
             }
-            UpdateAssetLabels();
-            UpdateChartLayers();
+            else
+            {
+                Logger.Log("새로운 로그 세션을 시작합니다.");
+            }
         }
 
-        private async void flowToolStripMenuItem_Click(object sender, EventArgs e)
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            await DoMainUpdate();
+            _ = _controller.ToggleBinanceService(false);
+            Logger.Log("시스템을 종료합니다.");
         }
 
+        #endregion
+
+        #region [상태 표시줄 및 유틸리티]
+
+        private void toolStripStatusLabel1_Click(object sender, EventArgs e) => HandleStatusLabelInteraction();
+        private void toolStripStatusLabel1_DoubleClick(object sender, EventArgs e) => HandleStatusLabelInteraction();
+
+        private void HandleStatusLabelInteraction()
+        {
+            string statusText = toolStripStatusLabel1.Text;
+            var match = System.Text.RegularExpressions.Regex.Match(statusText, @"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}");
+
+            if (!match.Success) return;
+
+            Clipboard.SetText(match.Value);
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "https://upbit.com/mypage/open_api_management",
+                    UseShellExecute = true
+                });
+                Logger.Log($"IP 복사 완료 및 업비트 관리 페이지 오픈: {match.Value}");
+            }
+            catch { }
+        }
+
+        private bool ShowApiKeyDialog(string title = "API Key 입력")
+        {
+            using var dlg = new Form
+            {
+                Text = title,
+                Size = new Size(420, 180),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog
+            };
+
+            var txtA = new TextBox { Location = new Point(110, 10), Width = 280 };
+            var txtS = new TextBox { Location = new Point(110, 40), Width = 280, UseSystemPasswordChar = true };
+            var btnOk = new Button { Text = "저장", Location = new Point(110, 80), DialogResult = DialogResult.OK };
+            var btnCan = new Button { Text = "취소", Location = new Point(200, 80), DialogResult = DialogResult.Cancel };
+
+            dlg.Controls.AddRange(new Control[] {
+                new Label { Text = "Access Key:", Location = new Point(10, 10) }, txtA,
+                new Label { Text = "Secret Key:", Location = new Point(10, 40) }, txtS,
+                btnOk, btnCan
+            });
+
+            if (dlg.ShowDialog() != DialogResult.OK) return false;
+
+            string a = txtA.Text.Trim();
+            string s = txtS.Text.Trim();
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(s)) return false;
+
+            ApiKeyStore.SaveKeys(a, s);
+            ApiConfig.AccessKey = a;
+            ApiConfig.SecretKey = s;
+            return true;
+        }
+
+        #endregion
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            if (cmbAlarmSound.Items.Count > 0)
+            {
+                cmbAlarmSound.SelectedIndex = 0;
+            }
+        }
+    }
+
+    public static class ControlExtensions
+    {
+        public static void InvokeIfRequired(this Control control, Action action)
+        {
+            if (control.InvokeRequired) control.Invoke(action);
+            else action();
+        }
     }
 }

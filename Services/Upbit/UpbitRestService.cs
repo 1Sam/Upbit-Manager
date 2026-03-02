@@ -12,11 +12,16 @@ using Upbit_Manager.Core;
 
 namespace Upbit_Manager.Services.Upbit
 {
-
     public class UpbitRestService : IRestService
     {
-        private readonly HttpClient _http = new() { BaseAddress = new Uri("https://api.upbit.com") };
+        private static readonly HttpClient _http = new()
+        {
+            BaseAddress = new Uri("https://api.upbit.com"),
+            Timeout = TimeSpan.FromSeconds(10)
+        };
+
         private readonly UpbitAuthenticator _authenticator;
+        private string _lastApiError = ""; // 중복 로그 방지
 
         public UpbitRestService(string accessKey, string secretKey)
         {
@@ -25,127 +30,125 @@ namespace Upbit_Manager.Services.Upbit
 
         public async Task<List<CommonCandle>> GetCandlesAsync(string market, int count)
         {
-            try
+            var json = await CallApiWithAuthAsync($"/v1/candles/minutes/1?market={market}&count={count}");
+            if (IsError(json)) return new List<CommonCandle>();
+
+            var dtos = JsonSerializer.Deserialize<List<UpbitCandleDto>>(json);
+            return dtos?.Select(d => new CommonCandle
             {
-                var path = $"/v1/candles/minutes/1?market={market}&count={count}";
-                var res = await _http.GetAsync(path);
-                res.EnsureSuccessStatusCode();
-
-                var json = await res.Content.ReadAsStringAsync();
-                var dtos = JsonSerializer.Deserialize<List<UpbitCandleDto>>(json);
-
-                if (dtos == null) return new List<CommonCandle>();
-
-                return dtos.Select(d => new CommonCandle
-                {
-                    Time = d.CandleDateTimeKst,
-                    Open = d.OpeningPrice,
-                    High = d.HighPrice,
-                    Low = d.LowPrice,
-                    Close = d.TradePrice,
-                    Volume = d.CandleAccTradeVolume
-                }).ToList();
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"캔들 조회 실패: {ex.Message}", "ERROR");
-                return new List<CommonCandle>();
-            }
+                Time = d.CandleDateTimeKst,
+                Open = d.OpeningPrice,
+                High = d.HighPrice,
+                Low = d.LowPrice,
+                Close = d.TradePrice,
+                Volume = d.CandleAccTradeVolume
+            }).ToList() ?? new List<CommonCandle>();
         }
 
         public async Task<List<AssetItem>> GetAccountsAsync()
         {
-            try
+            string json = await GetAccountsJsonAsync();
+            if (IsError(json)) return new List<AssetItem>();
+
+            var dtos = JsonSerializer.Deserialize<List<UpbitAccountDto>>(json);
+            return dtos?.Select(d => new AssetItem
             {
-                const string path = "/v1/accounts";
-                string jwtToken = _authenticator.CreateJwtToken();
-
-                using var request = new HttpRequestMessage(HttpMethod.Get, path);
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwtToken);
-
-                var res = await _http.SendAsync(request);
-                res.EnsureSuccessStatusCode();
-
-                var json = await res.Content.ReadAsStringAsync();
-                var dtos = JsonSerializer.Deserialize<List<UpbitAccountDto>>(json);
-
-                if (dtos == null) return new List<AssetItem>();
-
-                // [수정 포인트] ?? 연산자 에러 해결 및 안전한 형변환
-                return dtos.Select(d => new AssetItem
-                {
-                    Exchange = "Upbit",
-                    Symbol = d.Currency ?? "Unknown",
-                    // d.Balance가 string이면 double.Parse를, 숫자형이면 직접 대입하세요.
-                    // 여기서는 d.Balance가 숫자형(double/decimal)이라고 가정하여 수정했습니다.
-                    TotalInventory = Convert.ToDouble(d.Balance),
-                    AvgBuyPrice = Convert.ToDouble(d.AvgBuyPrice),
-                    CurrentPrice = 0
-                }).ToList();
-            }
-            catch (Exception ex)
-            {
-                Logger.Log($"계좌 조회 실패: {ex.Message}", "ERROR");
-                return new List<AssetItem>();
-            }
+                Exchange = "Upbit",
+                Symbol = d.Currency,
+                TotalInventory = Convert.ToDouble(d.Balance),
+                AvgBuyPrice = Convert.ToDouble(d.AvgBuyPrice)
+            }).ToList() ?? new List<AssetItem>();
         }
 
+        public async Task<string> GetAccountsJsonAsync() => await CallApiWithAuthAsync("/v1/accounts");
+
+        public async Task<string> GetOpenOrdersJsonAsync() => await CallApiWithAuthAsync("/v1/orders?state=wait");
 
 
-        // UpbitRestService.cs 내부
 
-        /// <summary>
-        /// 업비트 API 공통 호출 메서드 (인증 포함)
-        /// </summary>
-        // UpbitRestService.cs 내부
-        private async Task<string> CallApiAsync(string url)
+        private async Task<string> CallApiWithAuthAsync(string path)
         {
             try
             {
-                var uri = new Uri(url);
-                // "state=wait" 같은 부분을 추출합니다.
-                string queryString = uri.Query.TrimStart('?');
-
-                // [중요] 쿼리 스트링을 CreateJwtToken에 전달합니다!
+                string queryString = path.Contains("?") ? path.Split('?')[1] : "";
                 string jwtToken = _authenticator.CreateJwtToken(queryString);
 
-                using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwtToken);
-
-                var res = await _http.SendAsync(request);
-
-                if (!res.IsSuccessStatusCode)
+                using (var httpRequest = new HttpRequestMessage(HttpMethod.Get, path))
                 {
-                    // 401 에러가 나면 여기서 왜 죽었는지 본문을 읽어볼 수 있습니다.
-                    string errorContent = await res.Content.ReadAsStringAsync();
-                    Logger.Log($"API 에러: {res.StatusCode} - {errorContent}", "ERROR");
-                    return string.Empty;
-                }
+                    httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwtToken);
+                    var res = await _http.SendAsync(httpRequest);
+                    string content = await res.Content.ReadAsStringAsync();
 
-                return await res.Content.ReadAsStringAsync();
+                    if (!res.IsSuccessStatusCode)
+                    {
+                        string cleanMsg = ParseErrorMessage(content);
+
+                        if (content.Contains("no_authorization_ip"))
+                        {
+                            string myIp = await GetPublicIpAsync();
+                            cleanMsg = $"{cleanMsg} (내 IP: {myIp})";
+                        }
+
+                        if (_lastApiError != cleanMsg)
+                        {
+                            _lastApiError = cleanMsg;
+                            Logger.Log($"[Upbit API Error] {cleanMsg}", "ERROR");
+                        }
+
+                        // ⭐ 중요: 단순히 AUTH_FAILED 대신 에러 메시지 자체를 반환하거나 
+                        // 앞에 특수한 접두사를 붙여 구분합니다.
+                        return $"ERROR_MSG:{cleanMsg}";
+                    }
+
+                    _lastApiError = "";
+                    return content;
+                }
             }
             catch (Exception ex)
             {
-                Logger.Log($"API 호출 실패 ({url}): {ex.Message}", "ERROR");
-                return string.Empty;
+                return $"ERROR_MSG:{ex.Message}";
             }
         }
 
-        /// <summary>
-        /// 계좌 정보를 JSON 문자열로 반환
-        /// </summary>
-        public async Task<string> GetAccountsJsonAsync()
+        // ⭐ 내 공인 IP를 가져오는 헬퍼 메서드 (반드시 추가)
+        private async Task<string> GetPublicIpAsync()
         {
-            return await CallApiAsync("https://api.upbit.com/v1/accounts");
+            try
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+                return await client.GetStringAsync("https://api.ipify.org");
+            }
+            catch
+            {
+                return "IP 확인 불가";
+            }
         }
 
-        /// <summary>
-        /// 미체결 주문 목록을 JSON 문자열로 반환
-        /// </summary>
-        public async Task<string> GetOpenOrdersJsonAsync()
+        private string ParseErrorMessage(string json)
         {
-            // state=wait 파라미터가 포함되어야 미체결 주문만 가져옵니다.
-            return await CallApiAsync("https://api.upbit.com/v1/orders?state=wait");
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("error", out var errorElement))
+                {
+                    string message = errorElement.TryGetProperty("message", out var m) ? m.GetString() : "";
+
+                    // ⭐ 핵심: 메시지에 IP 주소가 포함되어 있다면(업비트 에러 특징), 
+                    // 정규식이 찾을 수 있도록 원문을 뒤에 살짝 붙여줍니다.
+                    if (json.Contains("no_authorization_ip"))
+                    {
+                        return $"{message} (Raw: {json})";
+                    }
+                    return message;
+                }
+                return json;
+            }
+            catch
+            {
+                return json.Replace("{", "").Replace("}", "").Replace("\"", "").Trim();
+            }
         }
+
+        private bool IsError(string res) => res == "AUTH_FAILED" || res == "ERROR" || string.IsNullOrEmpty(res);
     }
 }

@@ -1,463 +1,381 @@
-// UI/ChartManager.cs
-
 using ScottPlot;
+using ScottPlot.Plottables;
 using ScottPlot.WinForms;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Windows.Forms;
 using Upbit_Manager.Models.Common;
 using Upbit_Manager.UI.Series;
 using UpbitManager.Models.Upbit;
 
 namespace Upbit_Manager.UI
 {
-    /// <summary>
-    /// ScottPlot 차트 전담 관리자.
-    /// 모든 시리즈는 _seriesList에 IChartSeries 구현체로 등록하고,
-    /// UpdateUI()가 자동으로 순회하며 렌더링합니다.
-    /// 새 시리즈 추가 = 구현 클래스 1개 + _seriesList 한 줄 추가.
-    /// </summary>
     public class ChartManager
     {
-        // ─── ScottPlot 플롯 객체 ──────────────────────────────────────
+
+        
+        private double _lastPrice = 0;
+
+        public static double LastTimestampOA { get; private set; }
+
         private readonly FormsPlot _formsPlot;
-        private ScottPlot.Plot _candlePlot;  // 상단: 가격/지표
-        private ScottPlot.Plot _volumePlot;  // 하단: 거래량
+        private Plot _candlePlot;
+        private Plot _volumePlot;
 
-        // ─── 단일 락 객체 (데드락 방지) ───────────────────────────────
+        private HorizontalLine _currentPriceLine; // 재사용할 라인 객체
+        
+        // 1. 폰트 이름을 담아둘 필드 (캐싱)
+        private readonly string _malgunFontName;
+
+        private readonly PixelPadding _defaultPadding = new PixelPadding(3, 3, 3, 2); // 좌, 우, 상, 하
+
         private readonly object _dataLock = new();
-
-        // ─── 시리즈 레지스트리 ────────────────────────────────────────
-        /// <summary>
-        /// 모든 시리즈를 여기에만 등록합니다.
-        /// 순서 = 체크리스트 표시 순서 = 렌더링 순서
-        /// </summary>
-        private readonly List<IChartSeries> _seriesList;
-
-        // 자주 쓰는 시리즈는 직접 참조 (캐스팅 비용 절감)
-        private readonly UpbitCandleSeries _upbitCandle;
-        private readonly UpbitVolumeSeries _upbitVolume;
-        private readonly UpbitUsdtLineSeries _upbitUsdtLine;
-        private readonly UpbitOpenOrderSeries _upbitOpenOrder;
-        private readonly BinancePriceLineSeries _binanceLine;
-
-        // ─── 축 제어 상태 ─────────────────────────────────────────────
-        private bool _isAutoScroll = true;
-        private bool _isYAxisLocked = false;
-        private double _zoomedSpan = 0;
-
-        // concurrent queue for incoming ticks (produced by websocket thread)
+        private readonly List<IChartSeries> _seriesList = new();
         private readonly System.Collections.Concurrent.ConcurrentQueue<TradeTick> _tickQueue = new();
 
-        private const string FONT = "Malgun Gothic";
+        private bool _isAutoScroll = true;
+        private bool _isYAxisLocked = false;
 
-        // ─── 생성자 ───────────────────────────────────────────────────
+        // ─── 설정 값 ──────────────────────────────────────────
+        private readonly double _fixedSpan = TimeSpan.FromMinutes(200).TotalDays; // 200분 폭
+        private readonly double _rightMarginSpan = TimeSpan.FromSeconds(30).TotalDays; // ⭐ 30초 여백
+        private double _lastDataTimeOA = 0;
+
         public ChartManager(FormsPlot formsPlot)
         {
             _formsPlot = formsPlot;
 
-            // 시리즈 인스턴스 생성 및 등록
-            _upbitCandle = new UpbitCandleSeries();
-            _upbitVolume = new UpbitVolumeSeries();
-            _upbitUsdtLine = new UpbitUsdtLineSeries();
-            _upbitOpenOrder = new UpbitOpenOrderSeries();
-            _binanceLine = new BinancePriceLineSeries();
-
-            _seriesList = new List<IChartSeries>
+            // 2. 생성자 또는 초기화 시점에 딱 한 번만 실행
+            using (Font malgun = new Font("맑은 고딕", 12))
             {
-                _upbitCandle,
-                _upbitVolume,
-                _upbitOpenOrder,
-                _binanceLine,
-                _upbitUsdtLine,
-                // ↑ 새 시리즈는 여기에만 추가
-            };
+                _malgunFontName = malgun.Name;
+            }
 
-            // DefaultOn 값으로 초기 표시 상태 설정
-            foreach (var s in _seriesList)
-                s.IsVisible = s.DefaultOn;
-
+            // 3. (선택 사항) ScottPlot 전역 기본 폰트로 지정해버리기
+            ScottPlot.Fonts.Default = _malgunFontName;
+            
+            InitializeSeries();
             SetupMultiplot();
             SetupMouseInteraction();
 
-            // UI 갱신 타이머 (100ms 주기, 데이터 수집과 독립)
             var uiTimer = new System.Windows.Forms.Timer { Interval = 100 };
-            uiTimer.Tick += (s, e) =>
-            {
-                if (_formsPlot.IsHandleCreated)
-                    UpdateUI();
-            };
+            uiTimer.Tick += (s, e) => { if (_formsPlot.IsHandleCreated) UpdateUI(); };
             uiTimer.Start();
         }
 
-        // enqueue tick from background thread (no heavy locking)
+       
+
+        private void InitializeSeries()
+        {
+            _seriesList.Clear();
+            var seriesTypes = Assembly.GetExecutingAssembly().GetTypes()
+                .Where(t => typeof(IChartSeries).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
+
+            foreach (var type in seriesTypes)
+            {
+                if (Activator.CreateInstance(type) is IChartSeries s)
+                {
+                    s.IsVisible = s.DefaultOn;
+                    _seriesList.Add(s);
+                }
+            }
+        }
+
+        public IReadOnlyList<IChartSeries> SeriesList => _seriesList;
+
+        public void SetSeriesVisible(ExchangeSource source, SeriesType type, bool visible)
+        {
+            lock (_dataLock)
+            {
+                var series = _seriesList.FirstOrDefault(s => s.Source == source && s.Type == type);
+                if (series != null) series.IsVisible = visible;
+            }
+        }
+
+        public void PushData(SeriesType type, object payload, ExchangeSource source = ExchangeSource.Upbit)
+        {
+            lock (_dataLock)
+            {
+                // 1. 넘겨받은 type(VolumeLimit)과 일치하는 시리즈만 필터링
+                var targets = _seriesList.Where(s => s.Type == type && s.Source == source);
+                // 2. 해당 시리즈의 UpdateData만 호출!
+                foreach (var s in targets) s.UpdateData(payload);
+            }
+        }
+
         public void EnqueueTick(double price, double vol, string side)
         {
             _tickQueue.Enqueue(new TradeTick { Price = price, Volume = vol, Side = side, Time = DateTime.Now });
         }
 
-        // ─── 시리즈 목록 공개 (Form의 체크리스트 초기화에 사용) ────────
-        /// <summary>Form1에서 CheckedListBox를 초기화할 때 사용합니다.</summary>
-        public IReadOnlyList<IChartSeries> SeriesList => _seriesList;
+        public void ResetZoom() { lock (_dataLock) { _isAutoScroll = true; _isYAxisLocked = false; } }
 
-        // ─── 시리즈 표시 토글 ────────────────────────────────────────
-        /// <summary>
-        /// 체크리스트 항목 체크/해제 시 호출됩니다.
-        /// MainController를 거쳐 전달됩니다.
-        /// </summary>
-        public void SetSeriesVisible(ExchangeSource source, SeriesType type, bool visible)
-        {
-            var series = _seriesList.FirstOrDefault(s => s.Source == source && s.Type == type);
-            if (series == null) return;
-
-            series.IsVisible = visible;
-
-            // 바이낸스 선을 끌 때 버퍼 정리
-            if (!visible && source == ExchangeSource.Binance && type == SeriesType.PriceLine)
-                _binanceLine.Clear();
-        }
-
-        // ─── 데이터 업데이트 (외부 → 시리즈 내부 버퍼로 전달) ─────────
-
-        /// <summary>초기 데이터 로드 (종목 변경 시 호출)</summary>
-        public void InitializeWithData(string market,
-                                       List<CommonCandle> candles,
+        public void InitializeWithData(string market, List<CommonCandle> candles,
                                        List<(DateTime Time, double Price)> binanceHistory = null,
                                        List<(DateTime Time, double Price)> upbitUsdtHistory = null)
         {
             lock (_dataLock)
             {
-                // 각 시리즈 버퍼 초기화
-                foreach (var s in _seriesList)
-                    s.Clear();
+                foreach (var s in _seriesList) s.Clear();
 
-                // 업비트 초기 데이터 전달
-                _upbitCandle.UpdateData(candles ?? new());
-                _upbitVolume.UpdateData(candles ?? new());
-                // Upbit KRW-USDT 라인(김프 관찰용) 업데이트
-                if (upbitUsdtHistory != null)
-                    _upbitUsdtLine.UpdateData(upbitUsdtHistory);
+                foreach (var series in _seriesList)
+                {
+                    if (series.Source == ExchangeSource.Upbit && (series.Type == SeriesType.Candle || series.Type == SeriesType.Volume))
+                        series.UpdateData(candles ?? new());
+                    else if (series.Source == ExchangeSource.Binance && series.Type == SeriesType.PriceLine && binanceHistory != null)
+                        series.UpdateData(binanceHistory);
+                    else if (series.Source == ExchangeSource.Upbit && series.Type == SeriesType.PriceLine && series.Label.Contains("USDT") && upbitUsdtHistory != null)
+                        series.UpdateData(upbitUsdtHistory);
+                }
 
-                // 바이낸스 히스토리 전달
-                if (binanceHistory != null)
-                    _binanceLine.UpdateData(binanceHistory);
+                _lastDataTimeOA = (candles != null && candles.Count > 0)
+                    ? candles.Last().Time.ToOADate()
+                    : DateTime.Now.ToOADate();
 
-                // 종목 변경 시 축 상태 초기화
-                _isAutoScroll = true;
-                _isYAxisLocked = false;
-                _zoomedSpan = 0;
+                ResetZoom();
             }
-
             _candlePlot.Title($"{market} Chart");
-            ApplyAxisLimits();
             UpdateUI();
         }
 
-        /// <summary>실시간 업비트 체결 데이터 업데이트</summary>
-        public void UpdateRealtime(double price, double vol, string side)
+        // ChartManager.cs 내부
+        private void ProcessTickQueue()
         {
-            var payload = new UpbitRealtimePayload(price, vol, side);
-            lock (_dataLock)
+            while (_tickQueue.TryDequeue(out var t))
             {
-                _upbitCandle.UpdateData(payload);
-                _upbitVolume.UpdateData(payload);
+                _lastDataTimeOA = t.Time.ToOADate();
+                // ⭐ 여기서 오직 'UpbitRealtimePayload' 객체만 생성해서 쏘고 있습니다.
+                var payload = new UpbitRealtimePayload(t.Price, t.Volume, t.Side);
+                lock (_dataLock) { foreach (var s in _seriesList) s.UpdateData(payload); }
             }
         }
 
-        /// <summary>실시간 바이낸스 가격 업데이트 (항상 수집, 표시는 IsVisible로 제어)</summary>
-        public void UpdateBinancePrice(double krwPrice)
-        {
-            lock (_dataLock)
-                _binanceLine.UpdateData(krwPrice);
-        }
-
-        /// <summary>바이낸스 히스토리 병합 (초기 로드 시 호출)</summary>
-        public void UpdateBinanceHistory(List<(DateTime Time, double Price)> history)
-        {
-            if (history == null || history.Count == 0) return;
-            lock (_dataLock)
-                _binanceLine.UpdateData(history);
-        }
-
-        // ChartManager.cs 클래스 내부 적당한 곳에 추가
-
-        /// <summary>업비트 KRW-USDT 실시간 가격 업데이트</summary>
-        public void UpdateUsdtPrice(double price)
-        {
-            lock (_dataLock)
-            {
-                // 직접 참조 중인 _upbitUsdtLine에 데이터를 전달합니다.
-                _upbitUsdtLine.UpdateData(price);
-            }
-        }
-
-
-        /// <summary>미체결 주문 목록 업데이트</summary>
-        public void UpdateMyOrders(List<UpbitOpenOrder> orders)
-        {
-            lock (_dataLock)
-                _upbitOpenOrder.UpdateData(orders ?? new());
-        }
-
-        // ─── UI 렌더링 ────────────────────────────────────────────────
-
-        /// <summary>
-        /// 등록된 시리즈를 순회하며 자동 렌더링합니다.
-        /// IsVisible == true인 시리즈만 Render()를 호출합니다.
-        /// </summary>
         public void UpdateUI()
         {
-            if (_formsPlot.InvokeRequired)
-            {
-                _formsPlot.Invoke(new Action(UpdateUI));
-                return;
-            }
-            // 1) 드레인 큐: 웹소켓 스레드에서 들어온 틱을 한꺼번에 시리즈로 반영
-            var ticks = new List<TradeTick>();
-            while (_tickQueue.TryDequeue(out var t)) ticks.Add(t);
+            if (_formsPlot.InvokeRequired) { _formsPlot.Invoke(new Action(UpdateUI)); return; }
 
-            if (ticks.Count > 0)
-            {
-                lock (_dataLock)
-                {
-                    foreach (var tt in ticks)
-                    {
-                        var payload = new UpbitRealtimePayload(tt.Price, tt.Volume, tt.Side);
-                        _upbitCandle.UpdateData(payload);
-                        // determine whether current candle is rising by inspecting candle buffer (fallback)
-                        var candleBuf = _upbitCandle.GetBuffer();
-                        bool isRising = false;
-                        if (candleBuf.Count > 0)
-                        {
-                            var last = candleBuf[candleBuf.Count - 1];
-                            isRising = last.Close >= last.Open;
-                        }
-                        // pass both side and isRising as tuple; series will prefer explicit side if available
-                        _upbitVolume.UpdateData((tt.Price, tt.Volume, tt.Side, isRising));
-                    }
-                }
-            }
+            ProcessTickQueue();
+
+            // ⭐ 실시간성을 위해 틱 유무와 상관없이 현재 시간을 끝점으로 갱신
+            double currentTimeOA = DateTime.Now.ToOADate();
+            if (currentTimeOA > _lastDataTimeOA) _lastDataTimeOA = currentTimeOA;
 
             lock (_dataLock)
             {
-                // 캔들 데이터가 없으면 렌더링 스킵
-                if (_upbitCandle.GetBuffer().Count == 0) return;
-
                 _candlePlot.Clear();
                 _volumePlot.Clear();
 
-                // IsVisible인 시리즈만 순서대로 렌더링
-                foreach (var series in _seriesList.Where(s => s.IsVisible))
+                LastTimestampOA = _lastDataTimeOA;
+
+                // ChartManager.cs의 UpdateUI 내부
+                foreach (var s in _seriesList.Where(x => x.IsVisible))
                 {
-                    series.Render(_candlePlot, _volumePlot);
+                    // 객체가 "나 위쪽이야" 하면 상단에, "나 아래쪽이야" 하면 하단에 렌더링
+                    if (s.TargetGroup == AxisGroup.Price)
+                    {
+                        s.Render(_candlePlot, _candlePlot.Axes.Left);
+                    }
+                    else // AxisGroup.Volume 인 경우
+                    {
+                        s.Render(_volumePlot, _volumePlot.Axes.Left);
+                    }
                 }
 
-                ApplyAxisLimits();
-                ConfigureTicks(_candlePlot);
-                ConfigureTicks(_volumePlot);
-
+                ApplyFixedLimits();
                 _formsPlot.Refresh();
             }
         }
 
-        // ─── 축 범위 계산 ─────────────────────────────────────────────
-
-        private void ApplyAxisLimits()
+        private void ApplyFixedLimits()
         {
-            double nowOA = DateTime.Now.ToOADate();
+            if (!_isAutoScroll) return;
 
-            if (_isAutoScroll)
+            // ⭐ 여백 계산 로직
+            // 현재 시간(_lastDataTimeOA)을 기준으로 30초 더한 지점을 우측 끝으로 잡음
+            double rightLimit = _lastDataTimeOA + _rightMarginSpan;
+            double leftLimit = rightLimit - (_fixedSpan + _rightMarginSpan);
+
+            // X축 범위 설정 (Price와 Volume 차트 동기화)
+            _candlePlot.Axes.Bottom.Range.Set(leftLimit, rightLimit);
+            _volumePlot.Axes.Bottom.Range.Set(_candlePlot.Axes.Bottom.Range);
+
+            // Y축 오토스케일 (여백 공간 제외, 실제 데이터 영역 기준)
+            if (!_isYAxisLocked)
             {
-                // X축: 현재 시간을 우측 끝에 고정
-                double span = _zoomedSpan > 0 ? _zoomedSpan : TimeSpan.FromMinutes(200).TotalDays;
-                double rightMargin = TimeSpan.FromMinutes(0.5).TotalDays;
-                _candlePlot.Axes.Bottom.Range.Set(nowOA - span, nowOA + rightMargin);
-
-                // Y축: 화면에 보이는 데이터의 가격 범위를 모든 시리즈에서 수집
-                if (!_isYAxisLocked)
+                _candlePlot.Axes.AutoScaleY();
+                var yRange = _candlePlot.Axes.Left.Range;
+                if (yRange.Span > 0)
                 {
-                    double minOA = _candlePlot.Axes.Bottom.Range.Min;
-                    double maxOA = _candlePlot.Axes.Bottom.Range.Max;
-
-                    double high = double.MinValue;
-                    double low = double.MaxValue;
-
-                    // IsVisible인 시리즈에서 가격 범위 수집
-                    foreach (var series in _seriesList.Where(s => s.IsVisible))
-                    {
-                        var range = series.GetPriceRange(minOA, maxOA);
-                        if (range == null) continue;
-                        high = Math.Max(high, range.Value.Max);
-                        low = Math.Min(low, range.Value.Min);
-                    }
-
-                    if (high > double.MinValue && low < double.MaxValue)
-                    {
-                        double padding = (high - low) * 0.15;
-                        if (padding == 0) padding = high * 0.002;
-                        _candlePlot.Axes.Left.Range.Set(low - padding, high + padding);
-                    }
+                    double pad = yRange.Span * 0.15;
+                    _candlePlot.Axes.Left.Range.Set(yRange.Min - pad, yRange.Max + pad);
                 }
             }
-            else
-            {
-                // 수동 모드: 너무 미래로 이동하면 자동 리셋
-                if (_candlePlot.Axes.Bottom.Range.Min > nowOA + TimeSpan.FromMinutes(5).TotalDays)
-                    ResetZoom();
-            }
-
-            // 하단 거래량 Y축 독립 조정
-            double minX = _candlePlot.Axes.Bottom.Range.Min;
-            double maxX = _candlePlot.Axes.Bottom.Range.Max;
-
-            var volBuffer = _upbitVolume.GetBuffer();
-            var timeBuffer = _upbitVolume.GetTimeBuffer();
-
-            var visibleVols = timeBuffer
-                .Select((t, i) => new { OA = t.ToOADate(), Vol = volBuffer[i] })
-                .Where(x => x.OA >= minX && x.OA <= maxX)
-                .Select(x => x.Vol)
-                .ToList();
-
-            if (visibleVols.Any())
-            {
-                double maxVol = visibleVols.Max();
-                _volumePlot.Axes.Left.Range.Set(0, maxVol > 0 ? maxVol * 1.15 : 10);
-            }
-
-            // 하단 X축을 상단과 동기화
-            _volumePlot.Axes.Bottom.Range.Set(
-                _candlePlot.Axes.Bottom.Range.Min,
-                _candlePlot.Axes.Bottom.Range.Max);
+            _volumePlot.Axes.AutoScaleY();
+            _volumePlot.Axes.Left.Range.Set(0, _volumePlot.Axes.Left.Range.Max * 1.1);
         }
-
-        private void ConfigureTicks(ScottPlot.Plot plot)
-        {
-            var dtGen = new ScottPlot.TickGenerators.DateTimeAutomatic();
-            dtGen.LabelFormatter = dt => dt.ToString("HH:mm:ss");
-            plot.Axes.Bottom.TickGenerator = dtGen;
-        }
-
-        // ─── 마우스 인터랙션 ──────────────────────────────────────────
-
-        private void SetupMouseInteraction()
-        {
-            _formsPlot.MouseDown += (s, e) =>
-            {
-                _isAutoScroll = false;
-                _isYAxisLocked = true;
-            };
-
-            _formsPlot.MouseUp += (s, e) =>
-            {
-                // 우측 끝 근처면 자동 스크롤 재개
-                double currentMax = _candlePlot.Axes.Bottom.Range.Max;
-                double nowOA = DateTime.Now.ToOADate();
-                if (currentMax >= nowOA - TimeSpan.FromMinutes(2).TotalDays)
-                {
-                    _isAutoScroll = true;
-                    _isYAxisLocked = false;
-                }
-            };
-
-            _formsPlot.MouseWheel += (s, e) => { _isAutoScroll = false; };
-            _formsPlot.MouseClick += (s, e) =>
-            {
-                if (e.Button == MouseButtons.Right) ResetZoom();
-            };
-        }
-
-        // ─── Multiplot 초기화 ─────────────────────────────────────────
 
         private void SetupMultiplot()
         {
             _formsPlot.Multiplot.AddPlots(2);
             _candlePlot = _formsPlot.Multiplot.Subplots.GetPlot(0);
             _volumePlot = _formsPlot.Multiplot.Subplots.GetPlot(1);
-
             _formsPlot.Multiplot.Layout = new TwoRowLayout(0.75f);
 
-            _candlePlot.Layout.Fixed(new PixelPadding(85, 70, 20, 45));
-            _volumePlot.Layout.Fixed(new PixelPadding(85, 70, 10, 8));
+            // ⭐ 수정: PixelPadding(왼쪽, 오른쪽, 위, 아래)
+            // 두 번째 값(오른쪽)을 60에서 100~120 정도로 늘립니다.
+            var pad = new PixelPadding(75, 120, 20, 35);
 
-            InitAxisFormat(_candlePlot, true);
-            InitAxisFormat(_volumePlot, false);
+            _candlePlot.Layout.Fixed(pad);
+            _volumePlot.Layout.Fixed(pad);
 
-            SetupPlotStyle(_candlePlot, "Chart", true);
-            SetupPlotStyle(_volumePlot, "", false);
+            ConfigurePlot(_candlePlot, "Price (KRW)", true);
+            ConfigurePlot(_volumePlot, "Volume", false);
         }
 
-        private void InitAxisFormat(ScottPlot.Plot plot, bool showLabels)
+        private void ConfigurePlot(Plot plot, string yLabel, bool showXLabel)
         {
             plot.Axes.DateTimeTicksBottom();
             var dtGen = new ScottPlot.TickGenerators.DateTimeAutomatic();
             dtGen.LabelFormatter = dt => dt.ToString("HH:mm:ss");
             plot.Axes.Bottom.TickGenerator = dtGen;
-            if (!showLabels)
-                plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
+            plot.YLabel(yLabel);
+            plot.FigureBackground.Color = Colors.Black;
+            plot.DataBackground.Color = Colors.Black;
+            plot.Grid.MajorLineColor = Colors.Gray.WithAlpha(0.15);
+            plot.Axes.Color(Colors.Gray);
+            if (!showXLabel) plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
+
         }
 
-        private void SetupPlotStyle(ScottPlot.Plot plot, string title, bool showYLabel)
-        {
-            plot.Title(title);
-            plot.Axes.Title.Label.FontName = FONT;
-            if (showYLabel) plot.YLabel("Price (KRW)");
-            plot.FigureBackground.Color = Colors.WhiteSmoke;
-            plot.Grid.MajorLineColor = Colors.LightGray.WithAlpha(0.5);
-        }
 
-        // ─── 공개 유틸리티 ────────────────────────────────────────────
 
-        /// <summary>우측 끝(실시간)으로 이동하고 자동 스크롤 재개</summary>
-        public void FollowRealtime()
+        // 2. 외부(MainController)에서 호출하는 유일한 창구
+        public void UpdateCurrentPrice(double price)
         {
             lock (_dataLock)
             {
-                if (_zoomedSpan <= 0)
+                if (_currentPriceLine == null)
                 {
-                    _zoomedSpan = _candlePlot.Axes.Bottom.Range.Span;
-                    if (_zoomedSpan <= 0)
-                        _zoomedSpan = TimeSpan.FromMinutes(20).TotalDays;
+                    // 여기서 객체를 생성하고 '맑은 고딕' 설정을 입힙니다.
+                    _currentPriceLine = new ScottPlot.Plottables.HorizontalLine();
+                    ConfigurePriceLine(_currentPriceLine);
                 }
-                _isAutoScroll = true;
-                _isYAxisLocked = false;
+
+                _currentPriceLine.Y = price;
+                _currentPriceLine.Text = price.ToString("N0");
+
+                // 색상 로직 (상승/하락)
+                _currentPriceLine.LabelStyle.BackgroundColor = (price >= _lastPrice) ? Colors.Red : Colors.Blue;
+                _lastPrice = price;
             }
-            UpdateUI();
         }
 
-        /// <summary>확대/축소 및 스크롤 상태를 기본값으로 리셋</summary>
-        public void ResetZoom()
+
+        public void ConfigurePriceLine(HorizontalLine hline)
         {
-            _isAutoScroll = true;
-            _isYAxisLocked = false;
-            _zoomedSpan = 0;
+            hline.LabelStyle.FontName = _malgunFontName;
+            hline.LabelStyle.BorderRadius = 3;
+            hline.LabelStyle.PixelPadding = new PixelPadding(3, 3, 3, 2);
+            //hline.TextAlignment = Alignment.MiddleLeft;
+            //hline.LabelOppositeAxis = true;
+            hline.TextRotation = 0;
         }
 
-        /// <summary>바이낸스 버퍼만 즉시 비우기 (체크 해제 시 호출)</summary>
-        public void ClearBinanceSeries() => _binanceLine.Clear();
+        private void SetupMouseInteraction()
+        {
+            _formsPlot.MouseDown += (s, e) => {
+                _isAutoScroll = false;
+                _isYAxisLocked = true;
+            };
+
+            _formsPlot.MouseClick += (s, e) => {
+                if (e.Button == MouseButtons.Right) ResetZoom();
+            };
+
+            _candlePlot.RenderManager.AxisLimitsChanged += (s, e) =>
+            {
+                if (!_isAutoScroll)
+                {
+                    var newRange = _candlePlot.Axes.Bottom.Range;
+                    _volumePlot.Axes.Bottom.Range.Set(newRange.Min, newRange.Max);
+                }
+            };
+        }
+
+        public void ResetTimelineOnly()
+        {
+            lock (_dataLock)
+            {
+                // 1. 현재 사용자가 보고 있는 X축의 폭(Span)을 계산합니다.
+                // 이 과정을 거쳐야 확대/축소된 비율이 유지됩니다.
+                var currentRange = _candlePlot.Axes.Bottom.Range;
+                double currentSpan = currentRange.Span;
+
+                // 2. 자동 스크롤을 다시 켭니다.
+                _isAutoScroll = true;
+
+                // 3. 현재 시간 정보를 갱신합니다.
+                double currentTimeOA = DateTime.Now.ToOADate();
+                if (currentTimeOA > _lastDataTimeOA) _lastDataTimeOA = currentTimeOA;
+
+                // 4. [중요] 사용자가 보고 있던 폭(currentSpan)을 기반으로 새로운 범위를 잡습니다.
+                // _fixedSpan을 사용하지 않고 currentSpan을 사용함으로써 확대 비율을 유지합니다.
+                double rightLimit = _lastDataTimeOA + _rightMarginSpan;
+                double leftLimit = rightLimit - currentSpan;
+
+                // 5. 계산된 범위를 적용합니다.
+                _candlePlot.Axes.Bottom.Range.Set(leftLimit, rightLimit);
+                _volumePlot.Axes.Bottom.Range.Set(leftLimit, rightLimit);
+
+                // 6. (선택사항) 만약 이후로도 이 확대 비율을 계속 유지하며 흐르게 하고 싶다면
+                // 내부 필드인 _fixedSpan을 현재 폭으로 업데이트합니다.
+                // fieldInfo 등을 사용하지 않고 직접 접근 가능한 필드라면 아래 주석을 해제하세요.
+                // _fixedSpan = currentSpan - _rightMarginSpan; 
+            }
+
+            // UI 즉시 새로고침
+            if (_formsPlot.IsHandleCreated)
+            {
+                _formsPlot.BeginInvoke(new Action(() => _formsPlot.Refresh()));
+            }
+        }
+
+        #region [ 추가된 연결 메서드 ]
+
+        /// <summary>
+        /// 특정 거래소와 시리즈 타입에 해당하는 객체를 찾아 반환합니다.
+        /// 알람 엔진이나 외부 컨트롤러에서 특정 데이터 시리즈에 접근할 때 사용합니다.
+        /// </summary>
+        /// <typeparam name="T">반환받고자 하는 시리즈의 클래스 타입 (예: UpbitCandleSeries)</typeparam>
+        /// <param name="source">거래소 구분 (Upbit, Binance 등)</param>
+        /// <param name="type">시리즈 구분 (Candle, Volume, PriceLine 등)</param>
+        /// <returns>일치하는 시리즈 객체 (없을 경우 null)</returns>
+
+        public T? GetSeries<T>(ExchangeSource source, SeriesType type) where T : class, IChartSeries
+        {
+            lock (_dataLock) // ChartManager 내부에 정의된 lock 객체 사용
+            {
+                // ChartManager 내부에 있는 _seriesList를 참조합니다.
+                var series = _seriesList.FirstOrDefault(s => s.Source == source && s.Type == type);
+                return series as T;
+            }
+        }
+        #endregion
     }
 
-    // ─── 레이아웃 헬퍼 ────────────────────────────────────────────────
-
-    /// <summary>멀티플롯을 상/하 두 행으로 분할하는 레이아웃</summary>
     public class TwoRowLayout : ScottPlot.IMultiplotLayout
     {
         private readonly float _topFraction;
-        public TwoRowLayout(float topFraction) { _topFraction = topFraction; }
-
+        public TwoRowLayout(float topFraction) => _topFraction = topFraction;
         public PixelRect[] GetSubplotRectangles(SubplotCollection subplots, PixelRect figureRect)
         {
             PixelRect[] rects = new PixelRect[subplots.Count];
-            float topH = figureRect.Height * _topFraction;
-            float bottomH = figureRect.Height - topH;
-
-            rects[0] = new PixelRect(new PixelSize(figureRect.Width, topH))
-                           .WithDelta(figureRect.Left, figureRect.Top);
+            float topHeight = figureRect.Height * _topFraction;
+            rects[0] = new PixelRect(new PixelSize(figureRect.Width, topHeight)).WithDelta(figureRect.Left, figureRect.Top);
             if (subplots.Count > 1)
-                rects[1] = new PixelRect(new PixelSize(figureRect.Width, bottomH))
-                               .WithDelta(figureRect.Left, figureRect.Top + topH);
-
-            for (int i = 2; i < subplots.Count; i++)
-                rects[i] = new PixelRect(new PixelSize(figureRect.Width, 0))
-                               .WithDelta(figureRect.Left, figureRect.Top);
-
+                rects[1] = new PixelRect(new PixelSize(figureRect.Width, figureRect.Height - topHeight)).WithDelta(figureRect.Left, figureRect.Top + topHeight);
             return rects;
         }
     }

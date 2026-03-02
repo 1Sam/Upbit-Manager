@@ -1,6 +1,6 @@
 using System;
 
-namespace Upbit_Manager.UI.Series
+namespace Upbit_Manager.Models.Common
 {
     public record TradeTick
     {

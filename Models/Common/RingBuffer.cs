@@ -2,7 +2,9 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 
-namespace Upbit_Manager.UI.Series
+//배열 캐싱으로 GC 부담 줄이려고 만든 간단한 고정 크기 링 버퍼입니다. 꽉 차면 가장 오래된 항목이 덮어씌워집니다.
+
+namespace Upbit_Manager.Models.Common
 {
     // Simple fixed-size ring buffer. When full, oldest items are overwritten.
     public class RingBuffer<T> : IEnumerable<T>

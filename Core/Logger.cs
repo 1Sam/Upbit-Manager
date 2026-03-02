@@ -1,37 +1,40 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace Upbit_Manager.Core
 {
     /// <summary>
-    /// 프로그램의 실행 로그 및 에러를 텍스트 파일로 기록하는 클래스입니다.
+    /// 내 문서/Upbit_Manager 폴더에 로그를 기록하고 관리하는 클래스입니다.
     /// </summary>
     public static class Logger
     {
-        // UI에서 구독할 수 있는 이벤트 추가
         public static event Action<string>? OnLogAdded;
 
-        // 로그 저장 폴더: 실행파일위치/Logs
-        private static readonly string LogDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+        // ⭐ 경로 변경: 내 문서/Upbit_Manager
+        private static readonly string LogDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Upbit_Manager");
+
+        static Logger()
+        {
+            // 폴더가 없으면 미리 생성
+            if (!Directory.Exists(LogDirectory))
+                Directory.CreateDirectory(LogDirectory);
+        }
 
         public static void Log(string message, string level = "INFO")
         {
-            // 1. UI 알림을 파일 쓰기보다 먼저 수행 (파일 에러가 나더라도 UI엔 표시되게)
-            // 단, 메시지에 포함된 줄바꿈을 제거하여 UI 리스트가 깨지지 않게 방어
+            string logTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
             string cleanMessage = message.Replace(Environment.NewLine, " ").Replace("\n", " ");
-            string logTime = DateTime.Now.ToString("HH:mm:ss");
             string pureMessage = $"[{logTime}] [{level}] {cleanMessage}";
 
+            // 1. UI 이벤트 발생
+            try { OnLogAdded?.Invoke(pureMessage); } catch { }
+
+            // 2. 파일 기록
             try
             {
-                OnLogAdded?.Invoke(pureMessage);
-            }
-            catch { /* UI 이벤트 핸들러 에러 방어 */ }
-
-            try
-            {
-                if (!Directory.Exists(LogDirectory)) Directory.CreateDirectory(LogDirectory);
-
                 string fileName = $"{DateTime.Now:yyyy-MM-dd}.log";
                 string filePath = Path.Combine(LogDirectory, fileName);
 
@@ -40,21 +43,19 @@ namespace Upbit_Manager.Core
             }
             catch (Exception ex)
             {
-                // ★ 절대 여기서 Log()나 Error()를 다시 부르면 안 됩니다!
-                System.Diagnostics.Debug.WriteLine($"파일 기록 실패: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"로그 파일 기록 실패: {ex.Message}");
             }
         }
 
         public static void Error(Exception ex, string contextMessage = "")
         {
-            // Error 메서드는 단순히 문자열을 조립해서 Log에 던지는 역할만 수행
             string fullMessage = $"{contextMessage} - {ex.Message} {Environment.NewLine}[StackTrace]{Environment.NewLine}{ex.StackTrace}";
             Log(fullMessage, "ERROR");
         }
 
-
-
-        //이 메서드는 지정된 개수만큼 가장 최근 로그를 파일에서 읽어옵니다.
+        /// <summary>
+        /// 내 문서 폴더 내 로그 파일들을 뒤져서 가장 최근 로그 count개를 가져옵니다.
+        /// </summary>
         public static List<string> GetLastLogs(int count)
         {
             List<string> lastLogs = new List<string>();
@@ -62,14 +63,14 @@ namespace Upbit_Manager.Core
             {
                 if (!Directory.Exists(LogDirectory)) return lastLogs;
 
-                // 1. 로그 파일을 날짜 역순(최신순)으로 정렬하여 가져옴
+                // .log 파일들을 이름(날짜) 역순으로 정렬
                 var files = Directory.GetFiles(LogDirectory, "*.log")
                                      .OrderByDescending(f => f)
                                      .ToList();
 
                 foreach (var file in files)
                 {
-                    // 2. 파일의 모든 줄을 읽어서 역순으로 뒤집음 (최신 내용이 위로)
+                    // 파일 내용을 읽어 역순으로 뒤집어 최신 내용부터 검사
                     var lines = File.ReadAllLines(file).Reverse();
 
                     foreach (var line in lines)
@@ -77,14 +78,13 @@ namespace Upbit_Manager.Core
                         if (string.IsNullOrWhiteSpace(line)) continue;
                         lastLogs.Add(line);
 
-                        // 3. 원하는 개수를 채우면 중단
                         if (lastLogs.Count >= count) return lastLogs;
                     }
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"로그 불러오기 실패: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"과거 로그 로드 실패: {ex.Message}");
             }
             return lastLogs;
         }

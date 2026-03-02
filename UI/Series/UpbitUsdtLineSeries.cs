@@ -7,124 +7,129 @@ using Upbit_Manager.Models.Common;
 namespace Upbit_Manager.UI.Series
 {
     /// <summary>
-    /// 업비트 KRW-USDT 실시간 가격선 시리즈 (ScottPlot 5 최신 버전 대응)
+    /// 업비트 KRW-USDT 가격 라인 시리즈 (김치 프리미엄 확인용)
     /// </summary>
-    public class UpbitUsdtLineSeries : IChartSeries
+    public class UpbitUsdtLineSeries : ChartSeriesBase // ⬅️ 상속 구조로 변경
     {
-        public ExchangeSource Source => ExchangeSource.Upbit;
-        public SeriesType Type => SeriesType.PriceLine;
-        public string Label => "Upbit - KRW-USDT";
-        public override string ToString() => Label;
-        public bool DefaultOn => true;
-        public bool IsVisible { get; set; } = true;
+        public override ExchangeSource Source => ExchangeSource.Upbit;
+        public override SeriesType Type => SeriesType.PriceLine;
+        public override AxisGroup TargetGroup => AxisGroup.Price; // 상단 가격 패널 배치
+        public override string Label => "Upbit - KRW-USDT";
+        public override bool DefaultOn => false;
 
         private const int MAX_BUFFER = 3000;
-        private readonly List<(DateTime Time, double Price)> _buffer = new(MAX_BUFFER);
+        private readonly List<(DateTime Time, double Price)> _buffer = new List<(DateTime, double)>(MAX_BUFFER);
 
-        // ScottPlot 5.x 플로터
-        private ScottPlot.Plottables.Scatter? _scatterPlot;
-
-        public void UpdateData(object payload)
+        public override void UpdateData(object payload)
         {
             lock (_buffer)
             {
-                if (payload is double price)
+                // 1. 히스토리 데이터 주입 (가장 중요)
+                if (payload is List<(DateTime Time, double Price)> history)
                 {
-                    _buffer.Add((DateTime.Now, price));
-                }
-                else if (payload is List<(DateTime Time, double Price)> history)
-                {
+                    _buffer.Clear();
                     _buffer.AddRange(history);
                 }
-
-                if (_buffer.Count > MAX_BUFFER)
+                // 2. 캔들 리스트 주입
+                else if (payload is IEnumerable<CommonCandle> candles)
                 {
-                    _buffer.RemoveRange(0, _buffer.Count - MAX_BUFFER);
+                    _buffer.Clear();
+                    _buffer.AddRange(candles.Select(c => (c.Time, c.Close)));
+                }
+                // 3. 실시간 틱 주입
+                else if (payload is double currentPrice)
+                {
+                    // 실시간 데이터는 버퍼 끝에 추가
+                    _buffer.Add((DateTime.Now, currentPrice));
+                }
+
+                // ─── 데이터 정제: 시간순 정렬 및 중복 제거 ───
+                if (_buffer.Count > 0)
+                {
+                    var processed = _buffer
+                        .Where(x => x.Price > 0)
+                        .OrderBy(x => x.Time) // 시간순 정렬이 안 되면 선이 꼬입니다.
+                        .GroupBy(x => x.Time.Ticks / TimeSpan.FromSeconds(1).Ticks) // 1초 단위 중복 제거
+                        .Select(g => g.First())
+                        .TakeLast(MAX_BUFFER)
+                        .ToList();
+
+                    _buffer.Clear();
+                    _buffer.AddRange(processed);
                 }
             }
         }
 
-        public void Render(ScottPlot.Plot candlePlot, ScottPlot.Plot volumePlot)
+        public override void Render(Plot plot, IYAxis targetAxis)
         {
-            // 1. 체크박스 꺼져있으면 우측 축 숨기고 제거
-            if (!IsVisible)
-            {
-                if (_scatterPlot != null)
-                {
-                    candlePlot.Remove(_scatterPlot);
-                    _scatterPlot = null;
-                    candlePlot.Axes.Right.IsVisible = false;
-                }
-                return;
-            }
+            if (!IsVisible) return;
 
-            double[] xs;
-            double[] ys;
-
+            double[] xs, ys;
             lock (_buffer)
             {
                 if (_buffer.Count < 2) return;
-                var sorted = _buffer.OrderBy(x => x.Time).ToList();
-                xs = sorted.Select(x => x.Time.ToOADate()).ToArray();
-                ys = sorted.Select(x => x.Price).ToArray();
+                xs = _buffer.Select(x => x.Time.ToOADate()).ToArray();
+                ys = _buffer.Select(x => x.Price).ToArray();
             }
 
-            // 2. Scatter 플롯 생성 및 갱신
-            // ScottPlot 5에서는 매번 생성하여 추가하는 것이 가장 안정적입니다 (Clear() 이후 호출됨)
-            _scatterPlot = candlePlot.Add.Scatter(xs, ys);
-            _scatterPlot.Axes.YAxis = candlePlot.Axes.Right; // 우측 축 사용
-            _scatterPlot.Color = Colors.Gold.WithAlpha(0.8);
-            _scatterPlot.LineWidth = 2;
-            _scatterPlot.MarkerSize = 0;
+            // 1. 스캐터 추가
+            var scatter = plot.Add.ScatterLine(xs, ys); // ScatterLine은 선만 그릴 때 최적화됨
+            scatter.Color = Colors.Gold.WithAlpha(0.8);
+            scatter.LineWidth = 2;
 
-            // 3. 우측 Y축 범위 강제 고정 (요구사항 반영)
-            // 에이다 420원 위치에 USDT 1400원이 오도록 좌측 축의 범위를 참조하여 설정
-            double rightCenter = 1400;
-            var leftRange = candlePlot.Axes.Left.Range;
-            double leftSpan = leftRange.Span;
+            // 2. 우측 Y축(USDT 전용) 연결
+            var rightAxis = plot.Axes.Right;
+            rightAxis.IsVisible = true;
+            rightAxis.Label.Text = "USDT (KRW)";
+            scatter.Axes.YAxis = rightAxis;
 
-            // 좌측 가격 폭이 너무 작을 경우를 대비한 방어 코드
-            if (leftSpan <= 0) leftSpan = 100;
+            // 3. ⭐ 우측 Y축 범위(Range) 정상화 로직
+            // 현재 화면에 보이는 X축 범위 내의 데이터만 추출하여 Y축 범위를 잡습니다.
+            var xRange = plot.Axes.Bottom.Range;
+            var visibleYs = _buffer
+                .Where(d => d.Time.ToOADate() >= xRange.Min && d.Time.ToOADate() <= xRange.Max)
+                .Select(d => d.Price)
+                .ToList();
 
-            // 좌측과 동일한 '보여지는 가격 폭'을 적용하여 중앙 정렬
-            candlePlot.Axes.Right.Range.Set(rightCenter - (leftSpan / 2), rightCenter + (leftSpan / 2));
-
-            // 4. 우측 축 라벨 및 스타일 설정
-            candlePlot.Axes.Right.Label.Text = "USDT (KRW)";
-            candlePlot.Axes.Right.Label.ForeColor = Colors.Gold;
-            candlePlot.Axes.Right.IsVisible = true;
-
-            // 눈금 포맷팅 (숫자가 반복되지 않게 자동 설정)
-            candlePlot.Axes.Right.TickGenerator = new ScottPlot.TickGenerators.NumericAutomatic();
-        }
-
-        public void Clear()
-        {
-            lock (_buffer)
+            if (visibleYs.Any())
             {
-                _buffer.Clear();
+                double min = visibleYs.Min();
+                double max = visibleYs.Max();
+                double span = max - min;
+
+                // 변동폭이 너무 적으면(수평선 방지) 상하로 2원 정도 공간 확보
+                if (span < 1.0) span = 4.0;
+
+                // 데이터 상하로 20% 여유를 둠 (비정상적으로 좁은 축 방지)
+                rightAxis.Range.Set(min - (span * 0.5), max + (span * 0.5));
             }
-            _scatterPlot = null;
         }
 
-        public (double Min, double Max)? GetPriceRange(double minOA, double maxOA)
+        private void ApplyDynamicRatioScaling(Plot plot, IYAxis rightAxis, double[] ys)
         {
-            // USDT 선은 우측 별도 축을 쓰므로 전체 Y축 자동조절(Left)에 영향을 주지 않도록 null 반환
-            // 만약 Left 축 범위에 USDT 가격을 포함시키고 싶다면 아래 주석을 해제하세요.
-            return null;
+            if (ys.Length == 0) return;
 
-            /*
-            lock (_buffer)
-            {
-                var vis = _buffer.Where(x => {
-                    double oa = x.Time.ToOADate();
-                    return oa >= minOA && oa <= maxOA;
-                }).ToList();
+            // 왼쪽 가격 축의 범위를 가져와서 그 비율만큼 USDT 축도 벌려줌 (시각적 평행 유지)
+            var leftRange = plot.Axes.Left.Range;
+            double usdtLast = ys.Last();
 
-                if (!vis.Any()) return null;
-                return (vis.Min(v => v.Price), vis.Max(v => v.Price));
-            }
-            */
+            // 왼쪽 축의 현재 확장 비율(Span) 계산
+            double leftSpan = leftRange.Max - leftRange.Min;
+            double leftCenter = (leftRange.Max + leftRange.Min) / 2.0;
+
+            // 비율 계산 (0 나누기 방지)
+            double ratio = usdtLast / (leftCenter == 0 ? 1 : leftCenter);
+            double smartSpan = leftSpan * ratio;
+
+            rightAxis.Range.Set(usdtLast - smartSpan * 0.5, usdtLast + smartSpan * 0.5);
         }
+
+        public override void Clear()
+        {
+            lock (_buffer) _buffer.Clear();
+        }
+
+        // 보조 지표이므로 메인 가격 차트의 Y축 자동 범위 계산에는 영향을 주지 않음
+        public override (double Min, double Max)? GetPriceRange(double minOA, double maxOA) => null;
     }
 }
