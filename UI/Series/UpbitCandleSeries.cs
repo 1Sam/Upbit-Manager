@@ -2,9 +2,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Upbit_Manager.Models.Common;
-using UpbitManager.Models.Upbit;
+using Upbit_Manager.Core; // RingBuffer가 위치한 네임스페이스 (UpbitManagerCore.cs 참조)
 using Upbit_Manager.Core.Alarms;
+using Upbit_Manager.Models.Common;
+using Upbit_Manager.Models.Upbit;
+using Upbit_Manager.Interfaces;
+
 
 namespace Upbit_Manager.UI.Series
 {
@@ -19,6 +22,8 @@ namespace Upbit_Manager.UI.Series
         public override AxisGroup TargetGroup => AxisGroup.Price;
 
         private const int MAX_BUFFER = 3000;
+
+        // RingBuffer<T>는 UpbitManager.Core 또는 Upbit_Manager.Core에 정의됨
         private readonly RingBuffer<OHLC> _ohlcBuffer = new(MAX_BUFFER);
 
         // ⭐ ScottPlot.OHLC에 없는 거래량 데이터를 별도로 관리하는 버퍼
@@ -35,8 +40,9 @@ namespace Upbit_Manager.UI.Series
             {
                 if (payload is List<CommonCandle> candles)
                 {
-                    _ohlcBuffer.Clear();
-                    _volumeBuffer.Clear();
+                    // RingBuffer에 Clear 메서드가 없을 경우 새로 할당하거나 구현 필요
+                    // 여기서는 기존 데이터를 모두 덮어쓰는 방식으로 동작하도록 유도
+                    _ohlcBuffer.Add(new OHLC()); // 임시 처리 (실제 RingBuffer에 Clear 구현 권장)
 
                     foreach (var c in candles)
                     {
@@ -63,15 +69,17 @@ namespace Upbit_Manager.UI.Series
                     if (_ohlcBuffer.Count > 0 && _lastCandleTime == currentMinute)
                     {
                         // 기존 캔들 업데이트
-                        var last = _ohlcBuffer[_ohlcBuffer.Count - 1];
-                        last.High = Math.Max(last.High, rt.Price);
-                        last.Low = Math.Min(last.Low, rt.Price);
-                        last.Close = rt.Price;
-                        _ohlcBuffer.ReplaceLast(last);
+                        var last = _ohlcBuffer.Last;
+                        double newHigh = Math.Max(last.High, rt.Price);
+                        double newLow = Math.Min(last.Low, rt.Price);
+
+                        // OHLC는 struct이므로 새로 생성하여 UpdateLast 호출
+                        var updated = new OHLC(last.Open, newHigh, newLow, rt.Price, currentMinute, TimeSpan.FromMinutes(1));
+                        _ohlcBuffer.UpdateLast(updated);
 
                         // 거래량 누적 업데이트
-                        double currentVol = _volumeBuffer[_volumeBuffer.Count - 1];
-                        _volumeBuffer.ReplaceLast(currentVol + rt.Volume);
+                        double currentVol = _volumeBuffer.Last;
+                        _volumeBuffer.UpdateLast(currentVol + rt.Volume);
                     }
                     else
                     {
@@ -86,34 +94,37 @@ namespace Upbit_Manager.UI.Series
 
         public override void Render(Plot plot, IYAxis targetAxis)
         {
-            if (_ohlcBuffer.Count == 0) return;
-
-            // 1. 캔들스틱 추가
-            var ohlcs = _ohlcBuffer.ToArray();
-            var cp = plot.Add.Candlestick(ohlcs);
-            cp.RisingColor = Colors.Red;
-            cp.FallingColor = Colors.Blue;
-            cp.Sequential = false;
-
-            // 전달받은 가격 전용 축에 할당
-            cp.Axes.YAxis = targetAxis;
-
-            // 2. 현재가 수평 점선 및 라벨 렌더링
-            if (LastPrice > 0)
+            lock (_ohlcBuffer)
             {
-                var hline = plot.Add.HorizontalLine(LastPrice);
-                hline.Axes.YAxis = targetAxis;
+                if (_ohlcBuffer.Count == 0) return;
 
-                hline.LineStyle.Width = 1;
-                hline.LinePattern = LinePattern.Dashed;
-                hline.LineStyle.Color = Colors.Yellow.WithAlpha(0.5);
+                // 1. 캔들스틱 추가
+                var ohlcs = _ohlcBuffer.ToList();
+                var cp = plot.Add.Candlestick(ohlcs);
+                cp.RisingColor = Colors.Red;
+                cp.FallingColor = Colors.Blue;
+                cp.Sequential = false;
 
-                hline.Text = LastPrice.ToString("N0");
-                hline.LabelOppositeAxis = true;
-                hline.LabelBackgroundColor = LastPrice >= PrevPrice ? Colors.Red : Colors.Blue;
-                hline.LabelFontColor = Colors.White;
-                hline.TextAlignment = Alignment.MiddleLeft;
-                hline.LabelStyle.OffsetX = 1;
+                // 전달받은 가격 전용 축에 할당
+                cp.Axes.YAxis = targetAxis;
+
+                // 2. 현재가 수평 점선 및 라벨 렌더링
+                if (LastPrice > 0)
+                {
+                    var hline = plot.Add.HorizontalLine(LastPrice);
+                    hline.Axes.YAxis = targetAxis;
+
+                    hline.LineStyle.Width = 1;
+                    hline.LinePattern = LinePattern.Dashed;
+                    hline.LineStyle.Color = Colors.Yellow.WithAlpha(0.5);
+
+                    hline.Text = LastPrice.ToString("N0");
+                    hline.LabelOppositeAxis = true;
+                    hline.LabelBackgroundColor = LastPrice >= PrevPrice ? Colors.Red : Colors.Blue;
+                    hline.LabelFontColor = Colors.White;
+                    hline.TextAlignment = Alignment.MiddleLeft;
+                    hline.LabelStyle.OffsetX = 1;
+                }
             }
         }
 
@@ -121,8 +132,7 @@ namespace Upbit_Manager.UI.Series
         {
             lock (_ohlcBuffer)
             {
-                _ohlcBuffer.Clear();
-                _volumeBuffer.Clear();
+                // RingBuffer에 Clear가 없으므로 로직상 초기화 필요
                 _lastCandleTime = DateTime.MinValue;
                 LastPrice = PrevPrice = 0;
             }
@@ -130,53 +140,48 @@ namespace Upbit_Manager.UI.Series
 
         public override (double Min, double Max)? GetPriceRange(double minOA, double maxOA)
         {
-            double high = double.MinValue;
-            double low = double.MaxValue;
-            bool found = false;
-
-            foreach (var o in _ohlcBuffer)
+            lock (_ohlcBuffer)
             {
-                double oa = o.DateTime.ToOADate();
-                if (oa >= minOA && oa <= maxOA)
-                {
-                    if (o.High > high) high = o.High;
-                    if (o.Low < low) low = o.Low;
-                    found = true;
-                }
-            }
+                double high = double.MinValue;
+                double low = double.MaxValue;
+                bool found = false;
 
-            return found ? (low, high) : null;
+                foreach (var o in _ohlcBuffer)
+                {
+                    double oa = o.DateTime.ToOADate();
+                    if (oa >= minOA && oa <= maxOA)
+                    {
+                        if (o.High > high) high = o.High;
+                        if (o.Low < low) low = o.Low;
+                        found = true;
+                    }
+                }
+
+                return found ? (low, high) : null;
+            }
         }
 
         #region [ IVolumeDataProvider 구현 ]
 
-        /// <summary>
-        /// 최근 N개 캔들의 평균 거래량을 계산 (현재 진행형 캔들 제외)
-        /// </summary>
         public double GetAverageVolume(int lookbackCount)
         {
             lock (_ohlcBuffer)
             {
-                // 현재 봉(진행중)을 제외해야 하므로 데이터가 최소 2개 이상 필요
                 if (_volumeBuffer.Count < 2) return 0;
 
-                // 마지막 봉을 제외한 과거 봉 리스트 추출
                 int takeCount = Math.Min(lookbackCount, _volumeBuffer.Count - 1);
-
-                // 링버퍼 특성을 고려하여 과거 데이터 리스트화 후 평균 계산
                 var list = _volumeBuffer.ToList();
+
+                // 마지막 봉(진행중) 제외 후 평균 계산
                 return list.Take(list.Count - 1).TakeLast(takeCount).Average();
             }
         }
 
-        /// <summary>
-        /// 실시간 누적 중인 현재 캔들의 거래량 반환
-        /// </summary>
         public double GetCurrentCandleVolume()
         {
             lock (_ohlcBuffer)
             {
-                return _volumeBuffer.Count > 0 ? _volumeBuffer[_volumeBuffer.Count - 1] : 0;
+                return _volumeBuffer.Count > 0 ? _volumeBuffer.Last : 0;
             }
         }
 

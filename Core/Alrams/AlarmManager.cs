@@ -21,6 +21,19 @@ namespace Upbit_Manager.Core.Alarms
             lock (_lock) _alarms.Clear();
         }
 
+        /// <summary>
+        /// 컨트롤러에서 알람 목록에 접근하여 설정을 변경할 수 있도록 추가합니다.
+        /// 원본의 lock 메커니즘을 따릅니다.
+        /// </summary>
+        public List<IAlarmCondition> GetAlarms()
+        {
+            lock (_lock)
+            {
+                // 외부에서 리스트를 순회할 때 안정성을 위해 복사본을 반환하거나 ToList()를 사용합니다.
+                return _alarms.ToList();
+            }
+        }
+
         public void CheckAll(double price, double volume)
         {
             lock (_lock)
@@ -31,6 +44,7 @@ namespace Upbit_Manager.Core.Alarms
                     if ((DateTime.Now - alarm.LastTriggerTime).TotalSeconds < alarm.CooldownSeconds)
                         continue;
 
+                    // 원본 메서드 명칭인 Check와 Execute를 유지합니다.
                     if (alarm.Check(price, volume))
                     {
                         alarm.Execute(price, volume);

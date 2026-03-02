@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Upbit_Manager.Core;
 using Upbit_Manager.Core.Alarms;
@@ -14,18 +15,15 @@ using Upbit_Manager.Services.Upbit;
 using Upbit_Manager.UI;
 using Upbit_Manager.UI.Series;
 
-//각종 가격 데이터를 ChartManager에게 쏴줌.
 namespace Upbit_Manager.Controllers
 {
     public class MainController
     {
         // UI 연동 이벤트
         public Action<double>? OnExchangeRateUpdated;
-
-        // ⭐ 추가: 거래량 통계 업데이트 이벤트 (평균거래량, 기준거래량)
         public Action<double, double>? OnVolumeStatsUpdated;
 
-        // 의존성 주입 (Services)
+        // 서비스 및 매니저
         private readonly IRestService _upbitRest;
         private readonly ExchangeRateService _rateService;
         private readonly AccountManager _accountManager;
@@ -34,14 +32,15 @@ namespace Upbit_Manager.Controllers
         private readonly BinanceSocketService _binanceSocket;
         private readonly BinanceRestService _binanceRest;
 
-        // 시스템 엔진 (Alarms & Automation)
+        // 시스템 엔진
         private readonly AlarmManager _alarmManager;
         private readonly GridOrderManager _gridOrderManager;
 
-        // 상태 관리 변수
+        // 상태 변수
         private string _selectedMarket = "KRW-ADA";
         private double _currentRate = 1450.0;
         private bool _isBinanceActive = false;
+        private double _volAlarmMultiplier = 5.0;
 
         private UpbitCandleSeries? _currentUpbitCandleSeries;
 
@@ -59,7 +58,15 @@ namespace Upbit_Manager.Controllers
             _alarmManager = new AlarmManager();
             _gridOrderManager = new GridOrderManager();
 
+            // 1. 웹소켓 실시간 체결 데이터 처리
             _upbitSocket.OnTradeUpdated += HandleRealtimeTrade;
+
+            // 2. 웹소켓 실시간 캔들(OHLC) 데이터 처리
+            _upbitSocket.OnCandleUpdated += (candle) => {
+                _chartManager.PushData(SeriesType.Candle, candle, ExchangeSource.Upbit);
+                _chartManager.PushData(SeriesType.Volume, candle, ExchangeSource.Upbit);
+            };
+
             _binanceSocket.OnPriceUpdated += HandleBinanceRealtime;
 
             _alarmManager.AlarmTriggered += (alarm, price, vol) =>
@@ -74,12 +81,8 @@ namespace Upbit_Manager.Controllers
         {
             try
             {
-                var accountJson = await _upbitRest.GetAccountsJsonAsync();
-                if (accountJson.StartsWith("ERROR_MSG:")) return accountJson.Replace("ERROR_MSG:", "");
-
                 var assets = await _upbitRest.GetAccountsAsync();
                 _accountManager.UpdateAssets(assets);
-
                 await ChangeMarket(_selectedMarket);
                 return "SUCCESS";
             }
@@ -92,7 +95,6 @@ namespace Upbit_Manager.Controllers
         public async Task ChangeMarket(string market)
         {
             _selectedMarket = market.Trim().ToUpper();
-
             _currentRate = await _rateService.GetUsdToKrwAsync();
             OnExchangeRateUpdated?.Invoke(_currentRate);
 
@@ -111,15 +113,109 @@ namespace Upbit_Manager.Controllers
 
             SetupAlarms(avgPrice);
 
-            if (_isBinanceActive) await SyncBinanceHistory(_selectedMarket);
-
             _ = _upbitSocket.RunLoopAsync(new[] { _selectedMarket, "KRW-USDT" });
-            if (_isBinanceActive) await _binanceSocket.ConnectAsync(_selectedMarket);
+
+            if (_isBinanceActive)
+            {
+                await SyncBinanceHistory(_selectedMarket);
+                await _binanceSocket.ConnectAsync(_selectedMarket);
+            }
+
+            UpdateVolumeThreshold();
         }
 
         #endregion
 
-        #region [ 알람 로직 제어 ]
+        #region [ 실시간 데이터 핸들링 ]
+
+        private void HandleRealtimeTrade(double price, double vol, string side, string market)
+        {
+            string incomingMarket = market?.Trim().ToUpper() ?? "";
+            _accountManager.UpdateCurrentPrice(incomingMarket, price);
+
+            if (incomingMarket == _selectedMarket)
+            {
+                _chartManager.EnqueueTick(price, vol, side);
+                _chartManager.UpdateCurrentPrice(price);
+                _chartManager.PushData(SeriesType.PriceLine, (price, ExchangeSource.Upbit), ExchangeSource.Binance);
+
+                if (_currentUpbitCandleSeries != null)
+                {
+                    double avgVol = _currentUpbitCandleSeries.GetAverageVolume(20);
+                    double threshold = avgVol * _volAlarmMultiplier;
+
+                    OnVolumeStatsUpdated?.Invoke(avgVol, threshold);
+                    _chartManager.PushData(SeriesType.VolumeLimit, threshold, ExchangeSource.Upbit);
+
+                    double currentAccumulatedVol = _currentUpbitCandleSeries.GetCurrentCandleVolume();
+                    _alarmManager.CheckAll(price, currentAccumulatedVol);
+                }
+            }
+            else if (incomingMarket == "KRW-USDT")
+            {
+                _chartManager.PushData(SeriesType.PriceLine, price, ExchangeSource.Upbit);
+            }
+        }
+
+        private void HandleBinanceRealtime(double usdPrice)
+        {
+            if (_isBinanceActive && _currentRate > 0)
+            {
+                double binanceKrw = usdPrice * _currentRate;
+                _chartManager.PushData(SeriesType.PriceLine, binanceKrw, ExchangeSource.Binance);
+            }
+        }
+
+        #endregion
+
+        #region [ 자동화 로직 ]
+
+        public async Task ExecuteBatchPurchase(double startPrice)
+        {
+            try
+            {
+                Logger.Log($"[시스템] {_selectedMarket} | {startPrice:N0}원 기준 일괄 매수 시작...");
+                var gridOrders = new List<GridOrderItem>
+                {
+                    new() { Price = startPrice,         Quantity = 5 },
+                    new() { Price = startPrice * 0.98,  Quantity = 10 },
+                    new() { Price = startPrice * 0.96,  Quantity = 15 },
+                    new() { Price = startPrice * 0.94,  Quantity = 20 }
+                };
+                await _gridOrderManager.ExecuteBatchBuyLimitOrders(_selectedMarket, gridOrders);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"[오류] 일괄 매수 실패: {ex.Message}");
+            }
+        }
+
+        #endregion
+
+        #region [ 설정 변경 및 알람 제어 ]
+
+        public void SetVolumeMultiplier(double multiplier)
+        {
+            _volAlarmMultiplier = multiplier;
+            UpdateVolumeThreshold();
+
+            var volAlarm = _alarmManager.GetAlarms().OfType<RelativeVolumeAlarm>().FirstOrDefault();
+            if (volAlarm != null)
+            {
+                volAlarm.Multiplier = multiplier;
+            }
+        }
+
+        private void UpdateVolumeThreshold()
+        {
+            if (_currentUpbitCandleSeries != null)
+            {
+                double avgVol = _currentUpbitCandleSeries.GetAverageVolume(20);
+                double threshold = avgVol * _volAlarmMultiplier;
+                _chartManager.PushData(SeriesType.VolumeLimit, threshold, ExchangeSource.Upbit);
+                OnVolumeStatsUpdated?.Invoke(avgVol, threshold);
+            }
+        }
 
         private void SetupAlarms(double avgBuyPrice)
         {
@@ -127,13 +223,16 @@ namespace Upbit_Manager.Controllers
 
             if (_currentUpbitCandleSeries != null)
             {
+                // Name 속성이 읽기 전용이므로 생성 시점에 할당할 수 없다면 제거합니다.
+                // 만약 RelativeVolumeAlarm 생성자가 Name을 인자로 받는다면 생성자 수정을 고려해야 합니다.
                 var volAlarm = new RelativeVolumeAlarm(
                     () => _currentUpbitCandleSeries.GetAverageVolume(20),
-                    5.0
+                    _volAlarmMultiplier
                 )
                 {
                     CooldownSeconds = 60,
                     IsDiscordNotify = true
+                    // Name = "거래량 폭발 알람" <- 이 줄을 제거했습니다.
                 };
                 _alarmManager.AddAlarm(volAlarm);
             }
@@ -154,74 +253,7 @@ namespace Upbit_Manager.Controllers
 
         #endregion
 
-        #region [ 실시간 데이터 핸들링 ]
-
-        private void HandleRealtimeTrade(double price, double vol, string side, string market)
-        {
-            string incomingMarket = market?.Trim().ToUpper() ?? "";
-            _accountManager.UpdateCurrentPrice(incomingMarket, price);
-
-            if (incomingMarket == _selectedMarket)
-            {
-                _chartManager.EnqueueTick(price, vol, side);
-                _chartManager.UpdateCurrentPrice(price);
-
-                // 1. 이미 다른 데이터(바이낸스/업비트 연동)를 여기서 쏘고 계십니다!
-                _chartManager.PushData(SeriesType.PriceLine, (price, ExchangeSource.Upbit), ExchangeSource.Binance);
-
-                if (_currentUpbitCandleSeries != null)
-                {
-                    double avgVol = _currentUpbitCandleSeries.GetAverageVolume(20);
-                    // ⭐ 컴포넌트(UI)로부터 전달받아 저장해둔 배수(_volAlarmMultiplier)를 사용!
-                    double threshold = avgVol * _volAlarmMultiplier;
-
-                    // 2. UI 이벤트 발생 (라벨 업데이트용)
-                    OnVolumeStatsUpdated?.Invoke(avgVol, threshold);
-
-                    // ⭐ 3. 차트 시리즈용 데이터 전달 (이 줄이 빠져서 안 나왔던 겁니다)
-                    _chartManager.PushData(SeriesType.VolumeLimit, threshold, ExchangeSource.Upbit);
-
-                    // 알람 체크
-                    double currentAccumulatedVol = _currentUpbitCandleSeries.GetCurrentCandleVolume();
-                    _alarmManager.CheckAll(price, currentAccumulatedVol);
-                }
-            }
-            else if (incomingMarket == "KRW-USDT")
-            {
-                // 4. USDT 가격도 여기서 쏘고 계시네요.
-                _chartManager.PushData(SeriesType.PriceLine, price, ExchangeSource.Upbit);
-            }
-        }
-
-        private void HandleBinanceRealtime(double usdPrice)
-        {
-            if (_isBinanceActive && _currentRate > 0)
-            {
-                double binanceKrw = usdPrice * _currentRate;
-                _chartManager.PushData(SeriesType.PriceLine, binanceKrw, ExchangeSource.Binance);
-            }
-        }
-
-        #endregion
-
-        #region [ 자동화 및 외부 연동 ]
-
-        public async Task ExecuteBatchPurchase(double startPrice)
-        {
-            Logger.Log($"[시스템] {startPrice:N0}원 기준 그리드 일괄 매수 시퀀스 시작...");
-
-            var gridOrders = new List<GridOrderItem>
-            {
-                new() { Price = startPrice,       Quantity = 5 },
-                new() { Price = startPrice * 0.98, Quantity = 10 },
-                new() { Price = startPrice * 0.96, Quantity = 15 },
-                new() { Price = startPrice * 0.94, Quantity = 20 }
-            };
-
-            await _gridOrderManager.ExecuteBatchBuyLimitOrders(_selectedMarket, gridOrders);
-        }
-
-        #endregion
+        #region [ 외부 서비스 연동 ]
 
         public async Task ToggleBinanceService(bool isChecked)
         {
@@ -254,29 +286,6 @@ namespace Upbit_Manager.Controllers
 
         public string GetSelectedMarket() => _selectedMarket;
 
-
-
-        private double _volAlarmMultiplier = 5.0; // 기본값
-
-        // UI에서 배수를 변경했을 때 호출될 메서드
-        public void SetVolumeMultiplier(double multiplier)
-        {
-            _volAlarmMultiplier = multiplier;
-            // 변경 즉시 차트 선을 새로 그리기 위해 강제 업데이트 호출 가능
-            // ⭐ 배수가 변경되었을 때, 다음 틱을 기다리지 않고 즉시 차트를 갱신하고 싶다면
-            // 현재 계산된 마지막 평균값이 있을 때 PushData를 여기서 한 번 더 호출할 수도 있습니다.
-            UpdateVolumeThreshold();
-        }
-
-        private void UpdateVolumeThreshold()
-        {
-            if (_currentUpbitCandleSeries != null)
-            {
-                double avgVol = _currentUpbitCandleSeries.GetAverageVolume(20);
-                double threshold = avgVol * _volAlarmMultiplier;
-                _chartManager.PushData(SeriesType.VolumeLimit, threshold, ExchangeSource.Upbit);
-            }
-        }
-
+        #endregion
     }
 }

@@ -1,6 +1,7 @@
 ﻿using ScottPlot;
 using Upbit_Manager.Models.Common;
 using static System.Windows.Forms.LinkLabel;
+using Upbit_Manager.Interfaces;
 
 namespace Upbit_Manager.UI.Series
 {

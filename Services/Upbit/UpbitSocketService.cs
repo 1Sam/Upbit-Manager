@@ -1,3 +1,4 @@
+using ScottPlot;
 using System;
 using System.IO;
 using System.Net.WebSockets;
@@ -5,27 +6,49 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Upbit_Manager.Interfaces;
 using Upbit_Manager.Core;
 
 namespace Upbit_Manager.Services.Upbit
 {
-    public class UpbitSocketService
+    /// <summary>
+    /// 업비트 웹소켓을 통해 실시간 체결 데이터 및 차트용 캔들 데이터를 제공하는 서비스입니다.
+    /// </summary>
+    public class UpbitSocketService : ICandleProvider
     {
         private CancellationTokenSource? _wsCts;
+        private readonly Uri _uri = new Uri("wss://api.upbit.com/websocket/v1");
+
+        // 실시간 체결 정보 이벤트 (가격, 거래량, 체결종류, 마켓코드)
         public event Action<double, double, string, string>? OnTradeUpdated;
+
+        // ICandleProvider 인터페이스 구현
+        public event Action<OHLC>? OnCandleUpdated;
+
+        private OHLC? _currentCandle;
+        private string? _activeMarket;
 
         public async Task RunLoopAsync(string[] markets)
         {
             if (markets == null || markets.Length == 0) return;
+
+            _activeMarket = markets[0];
             Stop();
             _wsCts = new CancellationTokenSource();
 
             while (!_wsCts.Token.IsCancellationRequested)
             {
-                try { await StartWebSocketAsync(markets, _wsCts.Token); }
-                catch (Exception ex) { Logger.Log($"[Upbit WS] Reconnecting... {ex.Message}"); }
+                try
+                {
+                    await StartWebSocketAsync(markets, _wsCts.Token);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[Upbit WS] Reconnecting... {ex.Message}");
+                }
 
-                if (!_wsCts.Token.IsCancellationRequested) await Task.Delay(5000);
+                if (!_wsCts.Token.IsCancellationRequested)
+                    await Task.Delay(5000);
             }
         }
 
@@ -33,11 +56,18 @@ namespace Upbit_Manager.Services.Upbit
         {
             using ClientWebSocket socket = new();
             socket.Options.SetBuffer(65536, 65536);
-            await socket.ConnectAsync(new Uri("wss://api.upbit.com/websocket/v1"), ct);
 
-            // 구독 메시지
-            var subMsg = new object[] { new { ticket = "CHART_CLIENT" }, new { type = "trade", codes = markets } };
-            await socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(subMsg), WebSocketMessageType.Text, true, ct);
+            await socket.ConnectAsync(_uri, ct);
+
+            // 구독 메시지 (ticker가 아닌 trade 타입 사용)
+            var subMsg = new object[]
+            {
+                new { ticket = "UPBIT_MANAGER_CLIENT" },
+                new { type = "trade", codes = markets }
+            };
+
+            var msgBytes = JsonSerializer.SerializeToUtf8Bytes(subMsg);
+            await socket.SendAsync(new ArraySegment<byte>(msgBytes), WebSocketMessageType.Text, true, ct);
 
             byte[] buffer = new byte[65536];
 
@@ -45,14 +75,14 @@ namespace Upbit_Manager.Services.Upbit
             {
                 using var ms = new MemoryStream();
                 WebSocketReceiveResult result;
+
                 do
                 {
                     result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                     ms.Write(buffer, 0, result.Count);
                 } while (!result.EndOfMessage);
 
-                byte[] data = ms.ToArray();
-                _ = Task.Run(() => ParseAndNotify(data), ct);
+                ParseAndNotify(ms.ToArray());
             }
         }
 
@@ -63,19 +93,68 @@ namespace Upbit_Manager.Services.Upbit
                 using var doc = JsonDocument.Parse(data);
                 var root = doc.RootElement;
 
-                if (root.TryGetProperty("code", out var cProp))
+                if (root.TryGetProperty("code", out var codeProp))
                 {
-                    string market = cProp.GetString() ?? "";
+                    string market = codeProp.GetString() ?? "";
                     double price = root.GetProperty("trade_price").GetDouble();
                     double vol = root.GetProperty("trade_volume").GetDouble();
                     string side = root.GetProperty("ask_bid").GetString() ?? "BID";
+                    long timestamp = root.GetProperty("trade_timestamp").GetInt64();
 
-                    if (price > 0) OnTradeUpdated?.Invoke(price, vol, side, market);
+                    if (price <= 0) return;
+
+                    // 1. 실시간 가격 정보 전파
+                    OnTradeUpdated?.Invoke(price, vol, side, market);
+
+                    // 2. 활성 마켓(차트 표시 중인 마켓)의 캔들 처리
+                    if (market == _activeMarket)
+                    {
+                        ProcessCandleData(price, vol, timestamp);
+                    }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[WS Parse Error] {ex.Message}");
+            }
         }
 
-        public void Stop() => _wsCts?.Cancel();
+        private void ProcessCandleData(double price, double volume, long timestampMs)
+        {
+            var time = DateTimeOffset.FromUnixTimeMilliseconds(timestampMs).LocalDateTime;
+            var minuteTime = new DateTime(time.Year, time.Month, time.Day, time.Hour, time.Minute, 0);
+
+            // OHLC는 struct이므로 Nullable 체크 시 패턴 매칭 활용
+            if (_currentCandle is not OHLC current || current.DateTime != minuteTime)
+            {
+                // 새 분봉 시작
+                _currentCandle = new OHLC(price, price, price, price, minuteTime, TimeSpan.FromMinutes(1));
+            }
+            else
+            {
+                // 기존 분봉 업데이트
+                double high = Math.Max(current.High, price);
+                double low = Math.Min(current.Low, price);
+                _currentCandle = new OHLC(current.Open, high, low, price, minuteTime, TimeSpan.FromMinutes(1));
+            }
+
+            // 이벤트 발생 (Value를 통해 전달)
+            if (_currentCandle.HasValue)
+            {
+                OnCandleUpdated?.Invoke(_currentCandle.Value);
+            }
+        }
+
+        public void Stop()
+        {
+            _wsCts?.Cancel();
+            _wsCts = null;
+            _currentCandle = null;
+        }
+
+        public async Task StartAsync(string market, CancellationToken ct)
+        {
+            await RunLoopAsync(new[] { market });
+        }
     }
 }

@@ -1,8 +1,9 @@
 ﻿using ScottPlot;
 using Upbit_Manager.Models.Common;
 
-namespace Upbit_Manager.UI.Series
+namespace Upbit_Manager.Interfaces
 {
+
     public enum AxisGroup { Price, Volume, Indicator }
 
     public interface IChartSeries
