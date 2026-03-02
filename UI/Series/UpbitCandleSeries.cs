@@ -5,9 +5,7 @@ using System.Linq;
 using Upbit_Manager.Core; // RingBuffer가 위치한 네임스페이스 (UpbitManagerCore.cs 참조)
 using Upbit_Manager.Core.Alarms;
 using Upbit_Manager.Models.Common;
-using Upbit_Manager.Models.Upbit;
-using Upbit_Manager.Interfaces;
-
+using UpbitManager.Models.Upbit;
 
 namespace Upbit_Manager.UI.Series
 {
