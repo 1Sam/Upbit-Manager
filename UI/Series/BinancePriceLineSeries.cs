@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Upbit_Manager.Models.Common;
 using Upbit_Manager.Interfaces;
+using System.Security.Cryptography;
 
 namespace Upbit_Manager.UI.Series
 {
@@ -104,10 +105,10 @@ namespace Upbit_Manager.UI.Series
                 kimpText = $"{kimp:+0.00;-0.00;0.00}%";
 
                 // 조건별 색상 로직 적용
-                if (kimp >= 4.0) statusColor = Colors.Red;        // 4% 이상 빨강
-                else if (kimp >= 3.0) statusColor = Colors.Green;  // 3% 이상 녹색
-                else if (kimp >= 2.0) statusColor = Colors.Yellow; // 2% 이상 노랑
-                else if (kimp >= 1.0) statusColor = Colors.Orange; // 1% 이상 오렌지
+                if (kimp >= 3.0) statusColor = Colors.Blue;        // 4% 이상 빨강
+                else if (kimp > 2.0) statusColor = Colors.Yellow;  // 3% 이상 녹색
+                else if (kimp > 1.5) statusColor = Colors.Green; // 2% 이상 노랑
+                else if (kimp > 1.0) statusColor = Colors.Red; // 1% 이상 오렌지
                 else statusColor = Colors.Orange.WithAlpha(0.6);   // 1% 미만 흐린 오렌지
             }
 
@@ -117,21 +118,42 @@ namespace Upbit_Manager.UI.Series
             scatter.LineWidth = 2;
             scatter.Axes.YAxis = targetAxis;
 
-            // 3. 김프 레이블 표시
-            if (_lastUpbitPrice > 0 && lastBinancePrice > 0)
-            {
-                var txt = plot.Add.Text(kimpText, lastTimeOA, lastBinancePrice);
 
-                txt.LabelFontName = "맑은 고딕";
-                txt.LabelFontSize = 10;
-                // 노랑 배경일 때만 검은 글씨 사용
-                txt.LabelFontColor = (statusColor == Colors.Yellow) ? Colors.Black : Colors.White;
-                txt.LabelBackgroundColor = statusColor;
-                txt.LabelPadding = 2;
-                txt.LabelBorderRadius = 3;
-                txt.LabelAlignment = Alignment.MiddleLeft;
-                txt.Axes.YAxis = targetAxis;
-            }
+            //// 3. 김프 레이블 표시
+            //if (_lastUpbitPrice > 0 && lastBinancePrice > 0)
+            //{
+            //    var txt = plot.Add.Text(kimpText, lastTimeOA, lastBinancePrice);
+
+            //    txt.LabelFontName = "맑은 고딕";
+            //    txt.LabelFontSize = 10;
+            //    // 노랑 배경일 때만 검은 글씨 사용
+            //    txt.LabelFontColor = (statusColor == Colors.Yellow) ? Colors.Black : Colors.White;
+            //    txt.LabelBackgroundColor = statusColor;
+            //    txt.LabelPadding = 2;
+            //    txt.LabelBorderRadius = 3;
+            //    txt.LabelAlignment = Alignment.MiddleLeft;
+            //    txt.Axes.YAxis = targetAxis;
+            //}
+
+            // 3. 일반적인 방식: 현재가 수평선 및 우측 축 레이블
+            // HorizontalLine은 차트 전체를 가로지르는 선을 만들고 우측에 레이블을 붙여줍니다.
+            var hl = plot.Add.HorizontalLine(lastBinancePrice);
+            hl.LinePattern = LinePattern.Dashed; // 점선으로 표시하여 보조지표임을 명시
+            hl.LineWidth = 1;
+            hl.Color = statusColor;
+
+            // 우측 가격 축에 표시될 텍스트 설정
+            hl.LabelText = kimpText;
+            hl.LabelFontSize = 13;
+            hl.LabelFontColor = (statusColor == Colors.Yellow) ? Colors.Black : Colors.White;
+            hl.LabelBackgroundColor = statusColor;
+            hl.TextAlignment = Alignment.MiddleLeft;
+            hl.TextRotation = 0;
+            hl.LabelOppositeAxis = true;
+            hl.LabelStyle.OffsetX = 2;
+            //hl.LabelAlignment = Alignment.MiddleLeft; // 가격 축 텍스트 정렬
+
+            hl.Axes.YAxis = targetAxis;
         }
 
         public override (double Min, double Max)? GetPriceRange(double minOA, double maxOA)

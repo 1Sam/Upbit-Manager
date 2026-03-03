@@ -389,7 +389,7 @@
             tabPage2.Location = new Point(4, 24);
             tabPage2.Name = "tabPage2";
             tabPage2.Padding = new Padding(3);
-            tabPage2.Size = new Size(192, 259);
+            tabPage2.Size = new Size(192, 311);
             tabPage2.TabIndex = 1;
             tabPage2.Text = "Alram";
             tabPage2.UseVisualStyleBackColor = true;
@@ -409,7 +409,7 @@
             grpVolumeAlarm.Dock = DockStyle.Fill;
             grpVolumeAlarm.Location = new Point(3, 3);
             grpVolumeAlarm.Name = "grpVolumeAlarm";
-            grpVolumeAlarm.Size = new Size(186, 253);
+            grpVolumeAlarm.Size = new Size(186, 305);
             grpVolumeAlarm.TabIndex = 0;
             grpVolumeAlarm.TabStop = false;
             grpVolumeAlarm.Text = "실시간 거래량 알람";

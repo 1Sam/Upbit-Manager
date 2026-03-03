@@ -49,12 +49,15 @@ namespace Upbit_Manager.UI.Series
             line.LineWidth = 2;
 
             // 5. 우측 레이블 표시 설정
-            line.Text = $"기준: {_currentThreshold:N0}";
+            line.Text = $"{_currentThreshold:N0}";
             line.LabelStyle.FontName = "Malgun Gothic";
-            line.LabelStyle.FontSize = 10;
+            line.LabelStyle.FontSize = 12;
             line.LabelStyle.BackgroundColor = Colors.Orange;
             line.LabelStyle.ForeColor = Colors.White;
             line.LabelStyle.Padding = 2;
+            line.TextAlignment = Alignment.MiddleLeft;
+            line.TextRotation = 0;
+            line.LabelOppositeAxis = true;
 
             // 레이블을 차트 우측 끝에 붙이기 (선택 사항)
             line.LabelAlignment = Alignment.MiddleLeft;

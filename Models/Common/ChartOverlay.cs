@@ -12,7 +12,8 @@ namespace Upbit_Manager.Models.Common
     {
         Price,   // 상단 가격 영역
         Volume,  // 하단 거래량 영역
-        Indicator // (선택 사항) 보조 지표 영역
+        Indicator, // (선택 사항) 보조 지표 영역
+        Orderbook
     }
 
     public enum SeriesType
@@ -40,6 +41,10 @@ namespace Upbit_Manager.Models.Common
 
         [System.ComponentModel.Description("볼륨알람선")]
         VolumeLimit,
+
+        [System.ComponentModel.Description("Orderbook")]
+        Orderbook,
+
     }
 
     public class ChartSeriesItem

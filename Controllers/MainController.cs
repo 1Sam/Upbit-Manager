@@ -1,6 +1,8 @@
+using ScottPlot;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection.Emit;
 using System.Threading;
 using System.Threading.Tasks;
 using Upbit_Manager.Core;
@@ -144,6 +146,10 @@ namespace Upbit_Manager.Controllers
 
                 // 차트의 Y축에 현재가를 표시하는 전용 레이블(보통 가로 형태)을 그리도록 구현되어 있을 확률이 높습니다. 시리즈와 무관하게 차트 프레임워크 자체에서 지원하는 "현재가 표시" 기능
                 //_chartManager.UpdateCurrentPrice(price);
+
+
+
+
                 _chartManager.PushData(SeriesType.PriceLine, (price, ExchangeSource.Upbit), ExchangeSource.Binance);
 
                 if (_currentUpbitCandleSeries != null)

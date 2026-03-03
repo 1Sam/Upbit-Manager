@@ -15,17 +15,44 @@ using Upbit_Manager.Interfaces;
 namespace Upbit_Manager.UI
 {
     /// <summary>
-    /// ScottPlot 5.1 기반의 멀티플롯 차트 관리자입니다.
-    /// 가격 차트와 거래량 차트를 동기화하여 렌더링하며, 다양한 데이터 시리즈(IChartSeries)를 관리합니다.
+    /// 5분할 레이아웃: 좌측 2단(가격/거래량), 우측 3단(호가창 및 기타 데이터)
     /// </summary>
+    public class FivePanelLayout : ScottPlot.IMultiplotLayout
+    {
+        public PixelRect[] GetSubplotRectangles(SubplotCollection subplots, PixelRect figureRect)
+        {
+            PixelRect[] rects = new PixelRect[5];
+            float leftWidth = figureRect.Width * 0.75f;
+            float rightWidth = figureRect.Width * 0.25f;
+            float leftTopHeight = figureRect.Height * 0.75f;
+
+            // 좌측 영역 (Main Chart & Volume)
+            rects[0] = new PixelRect(leftWidth, leftTopHeight).WithDelta(figureRect.Left, figureRect.Top);
+            rects[1] = new PixelRect(leftWidth, figureRect.Height - leftTopHeight).WithDelta(figureRect.Left, figureRect.Top + leftTopHeight);
+
+            // 우측 영역 (3단 분할)
+            float rightPanelHeight = figureRect.Height / 3.0f;
+            rects[2] = new PixelRect(rightWidth, rightPanelHeight).WithDelta(figureRect.Left + leftWidth, figureRect.Top);
+            rects[3] = new PixelRect(rightWidth, rightPanelHeight).WithDelta(figureRect.Left + leftWidth, figureRect.Top + rightPanelHeight);
+            rects[4] = new PixelRect(rightWidth, figureRect.Height - (rightPanelHeight * 2)).WithDelta(figureRect.Left + leftWidth, figureRect.Top + (rightPanelHeight * 2));
+
+            return rects;
+        }
+    }
+
     public class ChartManager
     {
         private double _lastPrice = 0;
         public static double LastTimestampOA { get; private set; }
 
         private readonly FormsPlot _formsPlot;
+
+        // 5개의 플롯 참조 보관
         private Plot _candlePlot;
         private Plot _volumePlot;
+        private Plot _orderbookPlot;
+        private Plot _extraPlot1;
+        private Plot _extraPlot2;
 
         private HorizontalLine _currentPriceLine;
         private readonly string _malgunFontName;
@@ -36,28 +63,24 @@ namespace Upbit_Manager.UI
         private bool _isAutoScroll = true;
         private bool _isYAxisLocked = false;
 
-        // ─── 차트 뷰 설정 ──────────────────────────────────────────
-        private double _fixedSpan = TimeSpan.FromMinutes(200).TotalDays; // 기본 200분 폭
-        private readonly double _rightMarginSpan = TimeSpan.FromSeconds(30).TotalDays; // 우측 30초 여백
+        private double _fixedSpan = TimeSpan.FromMinutes(200).TotalDays;
+        private readonly double _rightMarginSpan = TimeSpan.FromSeconds(30).TotalDays;
         private double _lastDataTimeOA = 0;
 
         public ChartManager(FormsPlot formsPlot)
         {
             _formsPlot = formsPlot;
 
-            // 1. 폰트 설정 (한글 깨짐 방지)
             using (Font malgun = new Font("맑은 고딕", 12))
             {
                 _malgunFontName = malgun.Name;
             }
             ScottPlot.Fonts.Default = _malgunFontName;
 
-            // 2. 초기화 프로세스
             InitializeSeries();
             SetupMultiplot();
             SetupMouseInteraction();
 
-            // 3. UI 갱신 타이머 (100ms)
             var uiTimer = new System.Windows.Forms.Timer { Interval = 100 };
             uiTimer.Tick += (s, e) => { if (_formsPlot.IsHandleCreated) UpdateUI(); };
             uiTimer.Start();
@@ -66,7 +89,6 @@ namespace Upbit_Manager.UI
         private void InitializeSeries()
         {
             _seriesList.Clear();
-            // 리플렉션을 통해 프로젝트 내 모든 IChartSeries 구현체를 자동으로 찾아 등록합니다.
             var seriesTypes = Assembly.GetExecutingAssembly().GetTypes()
                 .Where(t => typeof(IChartSeries).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
 
@@ -82,17 +104,11 @@ namespace Upbit_Manager.UI
 
         public IReadOnlyList<IChartSeries> SeriesList => _seriesList;
 
-        /// <summary>
-        /// 외부에서 실시간 체결 정보를 큐에 삽입합니다.
-        /// </summary>
         public void EnqueueTick(double price, double vol, string side)
         {
             _tickQueue.Enqueue(new TradeTick { Price = price, Volume = vol, Side = side, Time = DateTime.Now });
         }
 
-        /// <summary>
-        /// 특정 시리즈에 데이터를 직접 주입합니다.
-        /// </summary>
         public void PushData(SeriesType type, object payload, ExchangeSource source = ExchangeSource.Upbit)
         {
             lock (_dataLock)
@@ -102,9 +118,6 @@ namespace Upbit_Manager.UI
             }
         }
 
-        /// <summary>
-        /// 차트 초기화 (과거 캔들 및 타 거래소 이력 데이터 로드)
-        /// </summary>
         public void InitializeWithData(string market, List<CommonCandle> candles,
                                        List<(DateTime Time, double Price)> binanceHistory = null,
                                        List<(DateTime Time, double Price)> upbitUsdtHistory = null)
@@ -152,27 +165,31 @@ namespace Upbit_Manager.UI
 
             ProcessTickQueue();
 
-            // 실시간성을 위해 틱이 없더라도 현재 시간을 축의 끝점으로 갱신
             double currentTimeOA = DateTime.Now.ToOADate();
             if (currentTimeOA > _lastDataTimeOA) _lastDataTimeOA = currentTimeOA;
 
             lock (_dataLock)
             {
+                // [해결] SubplotCollection에 foreach를 사용할 수 없는 문제를 직접 참조로 해결
                 _candlePlot.Clear();
                 _volumePlot.Clear();
+                _orderbookPlot.Clear();
+                _extraPlot1.Clear();
+                _extraPlot2.Clear();
 
                 LastTimestampOA = _lastDataTimeOA;
 
-                // 렌더링 그룹(가격/거래량)에 맞춰 시리즈 순회 렌더링
                 foreach (var s in _seriesList.Where(x => x.IsVisible))
                 {
-                    if (s.TargetGroup == AxisGroup.Price)
+                    // 시리즈 클래스 타입에 따른 렌더링 영역 분기
+                    if (s.Type == SeriesType.Orderbook)
+                        s.Render(_orderbookPlot, _orderbookPlot.Axes.Left);
+                    else if (s.TargetGroup == AxisGroup.Price)
                         s.Render(_candlePlot, _candlePlot.Axes.Left);
                     else
                         s.Render(_volumePlot, _volumePlot.Axes.Left);
                 }
 
-                // 현재가선 별도 렌더링
                 if (_currentPriceLine != null)
                     _candlePlot.Add.Plottable(_currentPriceLine);
 
@@ -185,43 +202,58 @@ namespace Upbit_Manager.UI
         {
             if (!_isAutoScroll) return;
 
-            // X축 범위: 현재 데이터 시간 + 30초 여백
             double rightLimit = _lastDataTimeOA + _rightMarginSpan;
             double leftLimit = rightLimit - (_fixedSpan + _rightMarginSpan);
 
             _candlePlot.Axes.Bottom.Range.Set(leftLimit, rightLimit);
             _volumePlot.Axes.Bottom.Range.Set(_candlePlot.Axes.Bottom.Range);
 
-            // Y축 오토스케일 (가격 차트)
             if (!_isYAxisLocked)
             {
                 _candlePlot.Axes.AutoScaleY();
                 var yRange = _candlePlot.Axes.Left.Range;
                 if (yRange.Span > 0)
                 {
-                    double pad = yRange.Span * 0.15; // 상하 15% 여유
+                    double pad = yRange.Span * 0.15;
                     _candlePlot.Axes.Left.Range.Set(yRange.Min - pad, yRange.Max + pad);
                 }
             }
 
-            // Y축 오토스케일 (거래량 차트)
             _volumePlot.Axes.AutoScaleY();
             _volumePlot.Axes.Left.Range.Set(0, _volumePlot.Axes.Left.Range.Max * 1.1);
+
+            _orderbookPlot.Axes.AutoScale();
         }
 
         private void SetupMultiplot()
         {
-            _formsPlot.Multiplot.AddPlots(2);
+            _formsPlot.Multiplot.AddPlots(5);
+
+            // 인덱스를 사용하여 안전하게 할당
             _candlePlot = _formsPlot.Multiplot.Subplots.GetPlot(0);
             _volumePlot = _formsPlot.Multiplot.Subplots.GetPlot(1);
-            _formsPlot.Multiplot.Layout = new TwoRowLayout(0.75f); // 7.5 : 2.5 비율
+            _orderbookPlot = _formsPlot.Multiplot.Subplots.GetPlot(2);
+            _extraPlot1 = _formsPlot.Multiplot.Subplots.GetPlot(3);
+            _extraPlot2 = _formsPlot.Multiplot.Subplots.GetPlot(4);
 
-            var pad = new PixelPadding(75, 120, 20, 35); // 좌, 우(레이블 공간), 상, 하
-            _candlePlot.Layout.Fixed(pad);
-            _volumePlot.Layout.Fixed(pad);
+            _formsPlot.Multiplot.Layout = new FivePanelLayout();
 
-            ConfigurePlot(_candlePlot, "Price (KRW)", true);
-            ConfigurePlot(_volumePlot, "Volume", false);
+            // 좌측 패딩
+            var mainPad = new PixelPadding(75, 70, 20, 35);
+            _candlePlot.Layout.Fixed(mainPad);
+            _volumePlot.Layout.Fixed(mainPad);
+
+            // 우측 패딩
+            var sidePad = new PixelPadding(40, 10, 10, 20);
+            _orderbookPlot.Layout.Fixed(sidePad);
+            _extraPlot1.Layout.Fixed(sidePad);
+            _extraPlot2.Layout.Fixed(sidePad);
+
+            ConfigurePlot(_candlePlot, "Price", true);
+            ConfigurePlot(_volumePlot, "Vol", false);
+            ConfigureSidePlot(_orderbookPlot, "Orderbook");
+            ConfigureSidePlot(_extraPlot1, "Extra 1");
+            ConfigureSidePlot(_extraPlot2, "Extra 2");
         }
 
         private void ConfigurePlot(Plot plot, string yLabel, bool showXLabel)
@@ -238,6 +270,16 @@ namespace Upbit_Manager.UI
             plot.Axes.Color(Colors.Gray);
 
             if (!showXLabel) plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
+        }
+
+        private void ConfigureSidePlot(Plot plot, string title)
+        {
+            plot.FigureBackground.Color = Colors.Black;
+            plot.DataBackground.Color = Colors.Black;
+            plot.Axes.Color(Colors.Gray);
+            plot.Grid.IsVisible = false;
+            plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
+            plot.Title(title, size: 10);
         }
 
         public void UpdateCurrentPrice(double price)
@@ -263,7 +305,7 @@ namespace Upbit_Manager.UI
             hline.LabelStyle.BorderRadius = 3;
             hline.LabelStyle.PixelPadding = new PixelPadding(3, 3, 3, 2);
             hline.TextRotation = 0;
-            hline.LabelOppositeAxis = true; // 우측 축에 라벨 표시
+            hline.LabelOppositeAxis = true;
         }
 
         private void SetupMouseInteraction()
@@ -277,7 +319,6 @@ namespace Upbit_Manager.UI
                 if (e.Button == MouseButtons.Right) ResetZoom();
             };
 
-            // 가격 차트와 거래량 차트의 X축 동기화
             _candlePlot.RenderManager.AxisLimitsChanged += (s, e) =>
             {
                 if (!_isAutoScroll)
@@ -297,16 +338,12 @@ namespace Upbit_Manager.UI
             }
         }
 
-        /// <summary>
-        /// 현재 확대 비율을 유지하면서 타임라인만 최신으로 이동시킵니다.
-        /// </summary>
         public void ResetTimelineOnly()
         {
             lock (_dataLock)
             {
                 var currentRange = _candlePlot.Axes.Bottom.Range;
                 double currentSpan = currentRange.Span;
-
                 _isAutoScroll = true;
 
                 double currentTimeOA = DateTime.Now.ToOADate();
@@ -317,8 +354,6 @@ namespace Upbit_Manager.UI
 
                 _candlePlot.Axes.Bottom.Range.Set(leftLimit, rightLimit);
                 _volumePlot.Axes.Bottom.Range.Set(leftLimit, rightLimit);
-
-                // 확대 비율 유지
                 _fixedSpan = currentSpan - _rightMarginSpan;
             }
 
@@ -335,24 +370,6 @@ namespace Upbit_Manager.UI
                 var series = _seriesList.FirstOrDefault(s => s.Source == source && s.Type == type);
                 return series as T;
             }
-        }
-    }
-
-    /// <summary>
-    /// 상단(가격)과 하단(거래량)의 비율을 조절하는 멀티플롯 레이아웃입니다.
-    /// </summary>
-    public class TwoRowLayout : ScottPlot.IMultiplotLayout
-    {
-        private readonly float _topFraction;
-        public TwoRowLayout(float topFraction) => _topFraction = topFraction;
-        public PixelRect[] GetSubplotRectangles(SubplotCollection subplots, PixelRect figureRect)
-        {
-            PixelRect[] rects = new PixelRect[subplots.Count];
-            float topHeight = figureRect.Height * _topFraction;
-            rects[0] = new PixelRect(new PixelSize(figureRect.Width, topHeight)).WithDelta(figureRect.Left, figureRect.Top);
-            if (subplots.Count > 1)
-                rects[1] = new PixelRect(new PixelSize(figureRect.Width, figureRect.Height - topHeight)).WithDelta(figureRect.Left, figureRect.Top + topHeight);
-            return rects;
         }
     }
 }

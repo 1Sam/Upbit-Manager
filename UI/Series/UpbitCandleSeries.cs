@@ -16,7 +16,7 @@ namespace Upbit_Manager.UI.Series
     /// 업비트 캔들 데이터를 관리하고 ScottPlot에 최적화된 방식으로 렌더링하는 클래스입니다.
     /// 배열 캐싱, Dirty 플래그, Plottable 객체 재사용을 통해 GC 부하를 최소화합니다.
     /// </summary>
-    public class UpbitCandleSeries : ChartSeriesBase, IChartSeries, IVolumeDataProvider
+    public class UpbitCandleSeries : ChartSeriesBase, IVolumeDataProvider
     {
         // ─── 속성 정의 (IChartSeries 구현) ──────────────────────────────────────────
 
@@ -174,7 +174,7 @@ namespace Upbit_Manager.UI.Series
                         _priceLineObject.Axes.YAxis = targetAxis;
                         _priceLineObject.LineStyle.Width = 1;
                         _priceLineObject.LinePattern = LinePattern.Dashed;
-                        _priceLineObject.LabelOppositeAxis = true;
+                        //_priceLineObject.LabelOppositeAxis = true;
                         _priceLineObject.LabelFontColor = Colors.White;
                     }
 
@@ -183,6 +183,10 @@ namespace Upbit_Manager.UI.Series
                     _priceLineObject.Text = LastPrice.ToString("N0");
                     _priceLineObject.LineStyle.Color = Colors.Yellow.WithAlpha(0.6);
                     _priceLineObject.LabelBackgroundColor = LastPrice >= PrevPrice ? Colors.Red : Colors.Blue;
+                    _priceLineObject.TextAlignment = Alignment.MiddleLeft;
+                    _priceLineObject.TextRotation = 0;
+                    _priceLineObject.LabelOppositeAxis = true;
+                    _priceLineObject.LabelStyle.OffsetX = 2;
                 }
             }
         }
