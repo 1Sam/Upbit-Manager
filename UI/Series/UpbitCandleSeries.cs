@@ -82,39 +82,53 @@ namespace Upbit_Manager.UI.Series
                 }
                 else if (payload is UpbitRealtimePayload rt)
                 {
-                    // 2. 실시간 체결 데이터 처리
-                    PrevPrice = LastPrice;
-                    LastPrice = rt.Price;
-
-                    DateTime now = DateTime.Now;
-                    DateTime currentMinute = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0);
-
-                    if (_ohlcBuffer.Count > 0 && _lastCandleTime == currentMinute)
-                    {
-                        // 기존 현재분 캔들 업데이트
-                        var last = _ohlcBuffer.Last;
-                        var updated = new OHLC(
-                            last.Open,
-                            Math.Max(last.High, rt.Price),
-                            Math.Min(last.Low, rt.Price),
-                            rt.Price,
-                            currentMinute,
-                            TimeSpan.FromMinutes(1)
-                        );
-                        _ohlcBuffer.UpdateLast(updated);
-                        _volumeBuffer.UpdateLast(_volumeBuffer.Last + rt.Volume);
-                    }
-                    else
-                    {
-                        // 새로운 분봉 시작
-                        _ohlcBuffer.Add(new OHLC(rt.Price, rt.Price, rt.Price, rt.Price, currentMinute, TimeSpan.FromMinutes(1)));
-                        _volumeBuffer.Add(rt.Volume);
-                        _lastCandleTime = currentMinute;
-                    }
+                    ProcessTick(rt.Price, rt.Volume);
+                }
+                // ChartManager.ProcessTickQueue가 전달하는 튜플 처리
+                else if (payload is ValueTuple<double, double, string, DateTime> tick)
+                {
+                    ProcessTick(tick.Item1, tick.Item2);
                 }
 
                 // ⭐ 데이터가 변경되었으므로 다음 Render 시점에 복사가 필요함을 표시
                 _arrayDirty = true;
+            }
+        }
+
+        private void ProcessTick(double price, double volume)
+        {
+            PrevPrice = LastPrice;
+            LastPrice = price;
+
+            DateTime now = DateTime.Now;
+            DateTime currentMinute = new DateTime(
+                now.Year, now.Month, now.Day,
+                now.Hour, now.Minute, 0);
+
+            if (_ohlcBuffer.Count > 0 && _lastCandleTime == currentMinute)
+            {
+                // 기존 현재분 캔들 업데이트
+                var last = _ohlcBuffer.Last;
+                var updated = new OHLC(
+                    last.Open,
+                    Math.Max(last.High, price),
+                    Math.Min(last.Low, price),
+                    price,
+                    currentMinute,
+                    TimeSpan.FromMinutes(1)
+                );
+                _ohlcBuffer.UpdateLast(updated);
+                _volumeBuffer.UpdateLast(_volumeBuffer.Last + volume);
+            }
+            else
+            {
+                // 새로운 분봉 시작
+                _ohlcBuffer.Add(new OHLC(
+                    price, price, price, price,
+                    currentMinute,
+                    TimeSpan.FromMinutes(1)));
+                _volumeBuffer.Add(volume);
+                _lastCandleTime = currentMinute;
             }
         }
 

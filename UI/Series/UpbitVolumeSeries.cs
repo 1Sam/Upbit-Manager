@@ -46,59 +46,61 @@ namespace Upbit_Manager.UI.Series
 
         // ─── 데이터 업데이트 로직 ──────────────────────────────────────────
 
+        // UpbitVolumeSeries.UpdateData() - 튜플 처리 추가
         public override void UpdateData(object payload)
         {
             lock (_timeBuffer)
             {
-                // 1. 초기 대량 데이터 (과거 캔들) 로드
                 if (payload is List<CommonCandle> candles)
                 {
+                    // 기존 코드 그대로
                     _buyBuffer.Clear();
-                    _sellBuffer.Add(0); // 더미 데이터 방지용 초기화 필요시 사용
                     _sellBuffer.Clear();
                     _timeBuffer.Clear();
 
                     foreach (var c in candles)
                     {
-                        // 과거 데이터는 매수/매도 구분이 없으므로 5:5로 배분하여 표시
                         double half = c.Volume / 2.0;
                         _buyBuffer.Add(half);
                         _sellBuffer.Add(half);
                         _timeBuffer.Add(c.Time);
                     }
                 }
-                // 2. 실시간 틱 데이터 업데이트
                 else if (payload is UpbitRealtimePayload rt)
                 {
-                    DateTime now = DateTime.Now;
-                    DateTime currentMinute = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0);
-
-                    // 새로운 분봉(바) 생성 조건
-                    if (_timeBuffer.Count == 0 || _lastUpdateMinute != currentMinute)
-                    {
-                        _timeBuffer.Add(currentMinute);
-                        if (rt.Side == "BID") { _buyBuffer.Add(rt.Volume); _sellBuffer.Add(0); }
-                        else { _sellBuffer.Add(0); _buyBuffer.Add(rt.Volume); }
-                        _lastUpdateMinute = currentMinute;
-                    }
-                    else
-                    {
-                        // 현재 마지막 바에 거래량 합산 (RingBuffer의 인덱서 또는 UpdateLast 활용)
-                        int lastIdx = _timeBuffer.Count - 1;
-                        if (rt.Side == "BID")
-                        {
-                            double newVal = _buyBuffer[lastIdx] + rt.Volume;
-                            _buyBuffer.UpdateLast(newVal);
-                        }
-                        else
-                        {
-                            double newVal = _sellBuffer[lastIdx] + rt.Volume;
-                            _sellBuffer.UpdateLast(newVal);
-                        }
-                    }
+                    ProcessTick(rt.Volume, rt.Side);
+                }
+                // 추가: ChartManager 튜플 처리
+                else if (payload is ValueTuple<double, double, string, DateTime> tick)
+                {
+                    ProcessTick(tick.Item2, tick.Item3); // volume, side
                 }
 
                 _isDirty = true;
+            }
+        }
+
+        private void ProcessTick(double volume, string side)
+        {
+            DateTime now = DateTime.Now;
+            DateTime currentMinute = new DateTime(
+                now.Year, now.Month, now.Day,
+                now.Hour, now.Minute, 0);
+
+            if (_timeBuffer.Count == 0 || _lastUpdateMinute != currentMinute)
+            {
+                _timeBuffer.Add(currentMinute);
+                if (side == "BID") { _buyBuffer.Add(volume); _sellBuffer.Add(0); }
+                else { _sellBuffer.Add(volume); _buyBuffer.Add(0); }
+                _lastUpdateMinute = currentMinute;
+            }
+            else
+            {
+                int lastIdx = _timeBuffer.Count - 1;
+                if (side == "BID")
+                    _buyBuffer.UpdateLast(_buyBuffer[lastIdx] + volume);
+                else
+                    _sellBuffer.UpdateLast(_sellBuffer[lastIdx] + volume);
             }
         }
 

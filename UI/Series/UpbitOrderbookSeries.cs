@@ -6,6 +6,7 @@ using Upbit_Manager.Interfaces;
 using Upbit_Manager.Models.Upbit;
 using Upbit_Manager.Models.Common;
 using System.Diagnostics;
+//using Upbit_Manager.Core.Orderbook;
 
 namespace Upbit_Manager.UI.Series
 {
@@ -27,25 +28,33 @@ namespace Upbit_Manager.UI.Series
         private ScottPlot.Plottables.BarPlot? _barPlotObject;
         private readonly object _lock = new();
 
+        // 캐시 엔진 참조 (옵션)
+        //private OrderbookCacheEngine? _cacheEngine;
+
+
         public override void UpdateData(object payload)
         {
-            if (payload is UpbitOrderbookPayload ob)
+            if (payload is UpbitOrderbookPayload ob)  // 튜플 제거, 원래대로
             {
                 lock (_lock)
                 {
-                    _lastPayload = ob;
+                    // UpbitOrderbookPayload로 변환하거나
+                    _lastPayload = ob; 
                     _isDirty = true;
                     // 컬렉터로부터 데이터가 오는지 확인하는 생명선 로그
-                    Debug.WriteLine($"[Orderbook] Sync: Units={ob.Units.Count} TotalAsk={ob.TotalAskSize}");
+                    //Debug.WriteLine($"[Orderbook] Sync: Units={ob.Units.Length} TotalAsk={ob.TotalAskSize}");
+
+
                 }
             }
         }
+
 
         public override void Render(Plot plot, IYAxis targetAxis)
         {
             lock (_lock)
             {
-                if (_lastPayload == null || _lastPayload.Units.Count == 0)
+                if (_lastPayload == null || _lastPayload.Units.Length == 0)
                 {
                     if (_barPlotObject != null)
                     {
@@ -87,6 +96,7 @@ namespace Upbit_Manager.UI.Series
                     plot.Axes.AutoScaleX();
                 }
             }
+
         }
 
         private void UpdateBarList()
@@ -98,6 +108,10 @@ namespace Upbit_Manager.UI.Series
             // 호가 데이터를 정렬하여 리스트 생성
             foreach (var unit in _lastPayload.Units)
             {
+
+                // 데이터 확인
+                //Debug.WriteLine($"Ask: {unit.AskPrice} / {unit.AskSize} | Bid: {unit.BidPrice} / {unit.BidSize}");
+
                 // 매도 호가 (양수 방향)
                 _bars.Add(new Bar
                 {

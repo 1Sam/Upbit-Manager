@@ -1,236 +1,262 @@
+using Crypto.Collector.Shared;
 using ScottPlot;
 using ScottPlot.Plottables;
 using ScottPlot.WinForms;
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.Linq;
-using System.Reflection;
 using System.Windows.Forms;
-using Upbit_Manager.Models.Common;
-using Upbit_Manager.UI.Series;
-using Upbit_Manager.Models.Upbit;
 using Upbit_Manager.Interfaces;
+using Upbit_Manager.Models.Common;
+using Upbit_Manager.Models.Upbit;
+using Upbit_Manager.UI.Series;
 
 namespace Upbit_Manager.UI
 {
     /// <summary>
-    /// 5분할 레이아웃: 좌측 2단(가격/거래량), 우측 3단(호가창 및 기타 데이터)
+    /// 차트 렌더링 중앙 매니저
+    /// - 모든 Series를 수집하여 적절한 패널에 렌더링
+    /// - 실시간 틱 처리
+    /// - 오토 스크롤 / Y축 제어
     /// </summary>
-    public class FivePanelLayout : ScottPlot.IMultiplotLayout
+    public sealed class ChartManager
     {
-        public PixelRect[] GetSubplotRectangles(SubplotCollection subplots, PixelRect figureRect)
-        {
-            PixelRect[] rects = new PixelRect[5];
-            float leftWidth = figureRect.Width * 0.75f;
-            float rightWidth = figureRect.Width * 0.25f;
-            float leftTopHeight = figureRect.Height * 0.75f;
-
-            // 좌측 영역 (Main Chart & Volume)
-            rects[0] = new PixelRect(leftWidth, leftTopHeight).WithDelta(figureRect.Left, figureRect.Top);
-            rects[1] = new PixelRect(leftWidth, figureRect.Height - leftTopHeight).WithDelta(figureRect.Left, figureRect.Top + leftTopHeight);
-
-            // 우측 영역 (3단 분할)
-            float rightPanelHeight = figureRect.Height / 3.0f;
-            rects[2] = new PixelRect(rightWidth, rightPanelHeight).WithDelta(figureRect.Left + leftWidth, figureRect.Top);
-            rects[3] = new PixelRect(rightWidth, rightPanelHeight).WithDelta(figureRect.Left + leftWidth, figureRect.Top + rightPanelHeight);
-            rects[4] = new PixelRect(rightWidth, figureRect.Height - (rightPanelHeight * 2)).WithDelta(figureRect.Left + leftWidth, figureRect.Top + (rightPanelHeight * 2));
-
-            return rects;
-        }
-    }
-
-    public class ChartManager
-    {
-        private double _lastPrice = 0;
-        public static double LastTimestampOA { get; private set; }
+        #region Fields
 
         private readonly FormsPlot _formsPlot;
 
-        // 5개의 플롯 참조 보관
-        private Plot _candlePlot;
-        private Plot _volumePlot;
-        private Plot _orderbookPlot;
-        private Plot _extraPlot1;
-        private Plot _extraPlot2;
+        private Plot _pricePlot = null!;
+        private Plot _volumePlot = null!;
+        private Plot _orderbookPlot = null!;
+        private Plot _extraPlot1 = null!;
+        private Plot _extraPlot2 = null!;
 
-        private HorizontalLine _currentPriceLine;
-        private readonly string _malgunFontName;
-        private readonly object _dataLock = new();
         private readonly List<IChartSeries> _seriesList = new();
-        private readonly System.Collections.Concurrent.ConcurrentQueue<TradeTick> _tickQueue = new();
+        private readonly object _dataLock = new();
+
+        private readonly Queue<(double Price, double Volume, string Side, DateTime Time)> _tickQueue = new();
+
+        private double _lastTimestampOA;
+        private double _lastPrice;
 
         private bool _isAutoScroll = true;
-        private bool _isYAxisLocked = false;
+        private bool _isYAxisLocked;
 
-        private double _fixedSpan = TimeSpan.FromMinutes(200).TotalDays;
         private readonly double _rightMarginSpan = TimeSpan.FromSeconds(30).TotalDays;
-        private double _lastDataTimeOA = 0;
+        private double _fixedSpan = TimeSpan.FromMinutes(200).TotalDays;
+
+        private HorizontalLine? _currentPriceLine;
+
+        #endregion
+
+        #region Constructor
 
         public ChartManager(FormsPlot formsPlot)
         {
             _formsPlot = formsPlot;
 
-            using (Font malgun = new Font("맑은 고딕", 12))
-            {
-                _malgunFontName = malgun.Name;
-            }
-            ScottPlot.Fonts.Default = _malgunFontName;
-
             InitializeSeries();
             SetupMultiplot();
             SetupMouseInteraction();
 
-            var uiTimer = new System.Windows.Forms.Timer { Interval = 100 };
-            uiTimer.Tick += (s, e) => { if (_formsPlot.IsHandleCreated) UpdateUI(); };
-            uiTimer.Start();
+            var timer = new System.Windows.Forms.Timer { Interval = 100 };
+            timer.Tick += (_, _) =>
+            {
+                if (_formsPlot.IsHandleCreated)
+                    UpdateUI();
+            };
+            timer.Start();
         }
 
+        #endregion
+
+        #region Series Initialization
+
+        /// <summary>
+        /// Assembly에서 IChartSeries 구현체 자동 로딩
+        /// </summary>
         private void InitializeSeries()
         {
-            _seriesList.Clear();
-            var seriesTypes = Assembly.GetExecutingAssembly().GetTypes()
-                .Where(t => typeof(IChartSeries).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
+            var types = typeof(IChartSeries).Assembly.GetTypes()
+                .Where(t => typeof(IChartSeries).IsAssignableFrom(t)
+                            && !t.IsAbstract
+                            && !t.IsInterface);
 
-            foreach (var type in seriesTypes)
+            foreach (var type in types)
             {
-                if (Activator.CreateInstance(type) is IChartSeries s)
+                if (Activator.CreateInstance(type) is IChartSeries series)
                 {
-                    s.IsVisible = s.DefaultOn;
-                    _seriesList.Add(s);
+                    series.IsVisible = series.DefaultOn;
+                    _seriesList.Add(series);
                 }
             }
         }
 
-        public IReadOnlyList<IChartSeries> SeriesList => _seriesList;
-
-        public void EnqueueTick(double price, double vol, string side)
-        {
-            _tickQueue.Enqueue(new TradeTick { Price = price, Volume = vol, Side = side, Time = DateTime.Now });
-        }
-
-        public void PushData(SeriesType type, object payload, ExchangeSource source = ExchangeSource.Upbit)
+        public T? GetSeries<T>(ExchangeSource source, SeriesType type)
+            where T : class, IChartSeries
         {
             lock (_dataLock)
             {
-                var targets = _seriesList.Where(s => s.Type == type && s.Source == source);
-                foreach (var s in targets) s.UpdateData(payload);
+                return _seriesList
+                    .FirstOrDefault(s => s.Source == source && s.Type == type) as T;
             }
         }
 
-        public void InitializeWithData(string market, List<CommonCandle> candles,
-                                       List<(DateTime Time, double Price)> binanceHistory = null,
-                                       List<(DateTime Time, double Price)> upbitUsdtHistory = null)
+        #endregion
+
+        #region Public Data API
+
+        /// <summary>
+        /// 일반 데이터 전달
+        /// </summary>
+        public void PushData(SeriesType type, object payload, ExchangeSource source)
         {
             lock (_dataLock)
             {
-                foreach (var s in _seriesList) s.Clear();
-
-                foreach (var series in _seriesList)
+                foreach (var s in _seriesList
+                    .Where(x => x.Type == type && x.Source == source))
                 {
-                    if (series.Source == ExchangeSource.Upbit && (series.Type == SeriesType.Candle || series.Type == SeriesType.Volume))
-                        series.UpdateData(candles ?? new());
-                    else if (series.Source == ExchangeSource.Binance && series.Type == SeriesType.PriceLine && binanceHistory != null)
-                        series.UpdateData(binanceHistory);
-                    else if (series.Source == ExchangeSource.Upbit && series.Type == SeriesType.PriceLine && series.Label.Contains("USDT") && upbitUsdtHistory != null)
-                        series.UpdateData(upbitUsdtHistory);
+                    s.UpdateData(payload);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 오더북 전용 전달 (MMF Bridge용)
+        /// </summary>
+        public void PushOrderbook(long timestamp, OrderbookUnit[] units)
+        {
+            var payload = new UpbitOrderbookPayload
+            {
+                Timestamp = timestamp,
+                Units = units,
+                TotalAskSize = units.Sum(u => u.AskSize),
+                TotalBidSize = units.Sum(u => u.BidSize)
+            };
+
+            lock (_dataLock)
+            {
+                foreach (var s in _seriesList
+                    .Where(x => x.Type == SeriesType.Orderbook))
+                {
+                    s.UpdateData(payload);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 틱 큐 적재
+        /// </summary>
+        public void EnqueueTick(double price, double volume, string side)
+        {
+            lock (_tickQueue)
+            {
+                _tickQueue.Enqueue((price, volume, side, DateTime.Now));
+            }
+        }
+
+        /// <summary>
+        /// 초기 데이터 세팅
+        /// </summary>
+        public void InitializeWithData(
+            string market,
+            List<CommonCandle> candles,
+            List<(DateTime Time, double Price)>? binanceHistory = null,
+            List<(DateTime Time, double Price)>? usdtHistory = null)
+        {
+            lock (_dataLock)
+            {
+                foreach (var s in _seriesList)
+                    s.Clear();
+
+                foreach (var s in _seriesList)
+                {
+                    if (s.Type == SeriesType.Candle && s.Source == ExchangeSource.Upbit)
+                        s.UpdateData(candles);
+
+                    // 추가
+                    if (s.Type == SeriesType.Volume && s.Source == ExchangeSource.Upbit)
+                        s.UpdateData(candles);
+
+                    if (s.Type == SeriesType.PriceLine && s.Source == ExchangeSource.Binance && binanceHistory != null)
+                        s.UpdateData(binanceHistory);
+
+                    if (s.Type == SeriesType.PriceLine && s.Source == ExchangeSource.Upbit && usdtHistory != null)
+                        s.UpdateData(usdtHistory);
                 }
 
-                _lastDataTimeOA = (candles != null && candles.Count > 0)
-                    ? candles.Last().Time.ToOADate()
-                    : DateTime.Now.ToOADate();
-
-                ResetZoom();
+                _lastTimestampOA = candles.LastOrDefault()?.Time.ToOADate()
+                                   ?? DateTime.Now.ToOADate();
             }
-            _candlePlot.Title($"{market} Chart");
+
             UpdateUI();
         }
 
+        #endregion
+
+        #region UI Update Loop
+
         private void ProcessTickQueue()
         {
-            while (_tickQueue.TryDequeue(out var t))
+            lock (_tickQueue)
             {
-                _lastDataTimeOA = t.Time.ToOADate();
-                var payload = new UpbitRealtimePayload(t.Price, t.Volume, t.Side);
-                lock (_dataLock)
+                while (_tickQueue.Count > 0)
                 {
-                    foreach (var s in _seriesList) s.UpdateData(payload);
+                    var t = _tickQueue.Dequeue();
+                    _lastTimestampOA = t.Time.ToOADate();
+
+                    foreach (var s in _seriesList)
+                        s.UpdateData(t);
                 }
             }
         }
 
         public void UpdateUI()
         {
-            if (_formsPlot.InvokeRequired) { _formsPlot.Invoke(new Action(UpdateUI)); return; }
+            if (_formsPlot.InvokeRequired)
+            {
+                _formsPlot.Invoke(UpdateUI);
+                return;
+            }
 
             ProcessTickQueue();
 
-            double currentTimeOA = DateTime.Now.ToOADate();
-            if (currentTimeOA > _lastDataTimeOA) _lastDataTimeOA = currentTimeOA;
-
             lock (_dataLock)
             {
-                // [해결] SubplotCollection에 foreach를 사용할 수 없는 문제를 직접 참조로 해결
-                _candlePlot.Clear();
+                _pricePlot.Clear();
                 _volumePlot.Clear();
                 _orderbookPlot.Clear();
                 _extraPlot1.Clear();
                 _extraPlot2.Clear();
 
-                LastTimestampOA = _lastDataTimeOA;
-
                 foreach (var s in _seriesList.Where(x => x.IsVisible))
                 {
-                    // 시리즈 클래스 타입에 따른 렌더링 영역 분기
                     if (s.Type == SeriesType.Orderbook)
                         s.Render(_orderbookPlot, _orderbookPlot.Axes.Left);
                     else if (s.TargetGroup == AxisGroup.Price)
-                        s.Render(_candlePlot, _candlePlot.Axes.Left);
+                        s.Render(_pricePlot, _pricePlot.Axes.Left);
                     else
                         s.Render(_volumePlot, _volumePlot.Axes.Left);
                 }
 
                 if (_currentPriceLine != null)
-                    _candlePlot.Add.Plottable(_currentPriceLine);
+                    _pricePlot.Add.Plottable(_currentPriceLine);
 
-                ApplyFixedLimits();
+                ApplyAutoScroll();
+
                 _formsPlot.Refresh();
             }
         }
 
-        private void ApplyFixedLimits()
-        {
-            if (!_isAutoScroll) return;
+        #endregion
 
-            double rightLimit = _lastDataTimeOA + _rightMarginSpan;
-            double leftLimit = rightLimit - (_fixedSpan + _rightMarginSpan);
-
-            _candlePlot.Axes.Bottom.Range.Set(leftLimit, rightLimit);
-            _volumePlot.Axes.Bottom.Range.Set(_candlePlot.Axes.Bottom.Range);
-
-            if (!_isYAxisLocked)
-            {
-                _candlePlot.Axes.AutoScaleY();
-                var yRange = _candlePlot.Axes.Left.Range;
-                if (yRange.Span > 0)
-                {
-                    double pad = yRange.Span * 0.15;
-                    _candlePlot.Axes.Left.Range.Set(yRange.Min - pad, yRange.Max + pad);
-                }
-            }
-
-            _volumePlot.Axes.AutoScaleY();
-            _volumePlot.Axes.Left.Range.Set(0, _volumePlot.Axes.Left.Range.Max * 1.1);
-
-            _orderbookPlot.Axes.AutoScale();
-        }
+        #region Layout
 
         private void SetupMultiplot()
         {
             _formsPlot.Multiplot.AddPlots(5);
 
-            // 인덱스를 사용하여 안전하게 할당
-            _candlePlot = _formsPlot.Multiplot.Subplots.GetPlot(0);
+            _pricePlot = _formsPlot.Multiplot.Subplots.GetPlot(0);
             _volumePlot = _formsPlot.Multiplot.Subplots.GetPlot(1);
             _orderbookPlot = _formsPlot.Multiplot.Subplots.GetPlot(2);
             _extraPlot1 = _formsPlot.Multiplot.Subplots.GetPlot(3);
@@ -238,138 +264,106 @@ namespace Upbit_Manager.UI
 
             _formsPlot.Multiplot.Layout = new FivePanelLayout();
 
-            // 좌측 패딩
-            var mainPad = new PixelPadding(75, 70, 20, 35);
-            _candlePlot.Layout.Fixed(mainPad);
-            _volumePlot.Layout.Fixed(mainPad);
+            // 우측 Y축 레이블 공간 고정 (자동 계산으로 인한 레이아웃 밀림 방지)
+            _pricePlot.Layout.Fixed(new PixelPadding(left: 50, right: 80, bottom: 20, top: 10));
+            _volumePlot.Layout.Fixed(new PixelPadding(left: 50, right: 80, bottom: 20, top: 10));
 
-            // 우측 패딩
-            var sidePad = new PixelPadding(40, 10, 10, 20);
-            _orderbookPlot.Layout.Fixed(sidePad);
-            _extraPlot1.Layout.Fixed(sidePad);
-            _extraPlot2.Layout.Fixed(sidePad);
-
-            ConfigurePlot(_candlePlot, "Price", true);
-            ConfigurePlot(_volumePlot, "Vol", false);
+            ConfigurePlot(_pricePlot, "Price", true);
+            ConfigurePlot(_volumePlot, "Volume", false);
             ConfigureSidePlot(_orderbookPlot, "Orderbook");
-            ConfigureSidePlot(_extraPlot1, "Extra 1");
-            ConfigureSidePlot(_extraPlot2, "Extra 2");
+            ConfigureSidePlot(_extraPlot1, "Extra1");
+            ConfigureSidePlot(_extraPlot2, "Extra2");
         }
 
-        private void ConfigurePlot(Plot plot, string yLabel, bool showXLabel)
+        private static void ConfigurePlot(Plot plot, string yLabel, bool showX)
         {
             plot.Axes.DateTimeTicksBottom();
-            var dtGen = new ScottPlot.TickGenerators.DateTimeAutomatic();
-            dtGen.LabelFormatter = dt => dt.ToString("HH:mm:ss");
-            plot.Axes.Bottom.TickGenerator = dtGen;
-
             plot.YLabel(yLabel);
-            plot.FigureBackground.Color = Colors.Black;
-            plot.DataBackground.Color = Colors.Black;
-            plot.Grid.MajorLineColor = Colors.Gray.WithAlpha(0.15);
-            plot.Axes.Color(Colors.Gray);
 
-            if (!showXLabel) plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
+            if (!showX)
+                plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
         }
 
-        private void ConfigureSidePlot(Plot plot, string title)
+        private static void ConfigureSidePlot(Plot plot, string title)
         {
-            plot.FigureBackground.Color = Colors.Black;
-            plot.DataBackground.Color = Colors.Black;
-            plot.Axes.Color(Colors.Gray);
-            plot.Grid.IsVisible = false;
+            plot.Title(title);
             plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
-            plot.Title(title, size: 10);
         }
 
-        public void UpdateCurrentPrice(double price)
+        #endregion
+
+        #region Auto Scroll
+
+        private void ApplyAutoScroll()
         {
-            lock (_dataLock)
-            {
-                if (_currentPriceLine == null)
-                {
-                    _currentPriceLine = new HorizontalLine();
-                    ConfigurePriceLine(_currentPriceLine);
-                }
+            if (!_isAutoScroll)
+                return;
 
-                _currentPriceLine.Y = price;
-                _currentPriceLine.Text = price.ToString("N0");
-                _currentPriceLine.LabelStyle.BackgroundColor = (price >= _lastPrice) ? Colors.Red : Colors.Blue;
-                _lastPrice = price;
-            }
+            double right = _lastTimestampOA + _rightMarginSpan;
+            double left = right - (_fixedSpan + _rightMarginSpan);
+
+            _pricePlot.Axes.SetLimitsX(left, right);
+            _volumePlot.Axes.SetLimitsX(left, right);
+
+            if (!_isYAxisLocked)
+                _pricePlot.Axes.AutoScaleY();
+
+            _volumePlot.Axes.AutoScaleY();
+            _orderbookPlot.Axes.AutoScale();
         }
 
-        private void ConfigurePriceLine(HorizontalLine hline)
-        {
-            hline.LabelStyle.FontName = _malgunFontName;
-            hline.LabelStyle.BorderRadius = 3;
-            hline.LabelStyle.PixelPadding = new PixelPadding(3, 3, 3, 2);
-            hline.TextRotation = 0;
-            hline.LabelOppositeAxis = true;
-        }
+        #endregion
+
+        #region Mouse Interaction
 
         private void SetupMouseInteraction()
         {
-            _formsPlot.MouseDown += (s, e) => {
+            _formsPlot.MouseDown += (_, _) =>
+            {
                 _isAutoScroll = false;
                 _isYAxisLocked = true;
             };
 
-            _formsPlot.MouseClick += (s, e) => {
-                if (e.Button == MouseButtons.Right) ResetZoom();
-            };
-
-            _candlePlot.RenderManager.AxisLimitsChanged += (s, e) =>
+            _formsPlot.MouseClick += (_, e) =>
             {
-                if (!_isAutoScroll)
-                {
-                    var newRange = _candlePlot.Axes.Bottom.Range;
-                    _volumePlot.Axes.Bottom.Range.Set(newRange.Min, newRange.Max);
-                }
+                if (e.Button == MouseButtons.Right)
+                    ResetZoom();
             };
         }
 
         public void ResetZoom()
         {
-            lock (_dataLock)
-            {
-                _isAutoScroll = true;
-                _isYAxisLocked = false;
-            }
+            _isAutoScroll = true;
+            _isYAxisLocked = false;
         }
 
         public void ResetTimelineOnly()
         {
             lock (_dataLock)
             {
-                var currentRange = _candlePlot.Axes.Bottom.Range;
-                double currentSpan = currentRange.Span;
                 _isAutoScroll = true;
 
-                double currentTimeOA = DateTime.Now.ToOADate();
-                if (currentTimeOA > _lastDataTimeOA) _lastDataTimeOA = currentTimeOA;
+                double right = _lastTimestampOA + _rightMarginSpan;
+                double left = right - _fixedSpan;
 
-                double rightLimit = _lastDataTimeOA + _rightMarginSpan;
-                double leftLimit = rightLimit - currentSpan;
-
-                _candlePlot.Axes.Bottom.Range.Set(leftLimit, rightLimit);
-                _volumePlot.Axes.Bottom.Range.Set(leftLimit, rightLimit);
-                _fixedSpan = currentSpan - _rightMarginSpan;
+                _pricePlot.Axes.SetLimitsX(left, right);
+                _volumePlot.Axes.SetLimitsX(left, right);
             }
 
             if (_formsPlot.IsHandleCreated)
-            {
                 _formsPlot.BeginInvoke(new Action(() => _formsPlot.Refresh()));
-            }
         }
 
-        public T? GetSeries<T>(ExchangeSource source, SeriesType type) where T : class, IChartSeries
+        public IReadOnlyList<IChartSeries> SeriesList
         {
-            lock (_dataLock)
+            get
             {
-                var series = _seriesList.FirstOrDefault(s => s.Source == source && s.Type == type);
-                return series as T;
+                lock (_dataLock)
+                {
+                    return _seriesList.ToList();
+                }
             }
         }
+        #endregion
     }
 }
