@@ -18,8 +18,4 @@
     <ProjectReference Include="..\Crypto.Collector\Crypto.Collector.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Folder Include="Core\Orderbook\" />
-  </ItemGroup>
-
 </Project>

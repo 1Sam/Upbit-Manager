@@ -70,6 +70,7 @@
             lblCurrentAvg = new Label();
             numVolMultiplier = new NumericUpDown();
             chkAlarmEnable = new CheckBox();
+            tsHeatmap = new ToolStripMenuItem();
             statusStrip1.SuspendLayout();
             groupBox1.SuspendLayout();
             groupBox2.SuspendLayout();
@@ -285,7 +286,7 @@
             // 
             // menuStrip1
             // 
-            menuStrip1.Items.AddRange(new ToolStripItem[] { toolStripMenuItem2, flowToolStripMenuItem });
+            menuStrip1.Items.AddRange(new ToolStripItem[] { toolStripMenuItem2, flowToolStripMenuItem, tsHeatmap });
             menuStrip1.Location = new Point(0, 0);
             menuStrip1.Name = "menuStrip1";
             menuStrip1.Size = new Size(1097, 24);
@@ -389,7 +390,7 @@
             tabPage2.Location = new Point(4, 24);
             tabPage2.Name = "tabPage2";
             tabPage2.Padding = new Padding(3);
-            tabPage2.Size = new Size(192, 311);
+            tabPage2.Size = new Size(192, 259);
             tabPage2.TabIndex = 1;
             tabPage2.Text = "Alram";
             tabPage2.UseVisualStyleBackColor = true;
@@ -409,7 +410,7 @@
             grpVolumeAlarm.Dock = DockStyle.Fill;
             grpVolumeAlarm.Location = new Point(3, 3);
             grpVolumeAlarm.Name = "grpVolumeAlarm";
-            grpVolumeAlarm.Size = new Size(186, 305);
+            grpVolumeAlarm.Size = new Size(186, 253);
             grpVolumeAlarm.TabIndex = 0;
             grpVolumeAlarm.TabStop = false;
             grpVolumeAlarm.Text = "실시간 거래량 알람";
@@ -514,6 +515,13 @@
             chkAlarmEnable.Text = "알람 활성화";
             chkAlarmEnable.UseVisualStyleBackColor = true;
             // 
+            // tsHeatmap
+            // 
+            tsHeatmap.Name = "tsHeatmap";
+            tsHeatmap.Size = new Size(68, 20);
+            tsHeatmap.Text = "Heetmap";
+            tsHeatmap.Click += tsHeatmap_Click;
+            // 
             // Form1
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
@@ -604,5 +612,6 @@
         private Label label2;
         private GroupBox groupBox3;
         private Label lblCooldownValue;
+        private ToolStripMenuItem tsHeatmap;
     }
 }

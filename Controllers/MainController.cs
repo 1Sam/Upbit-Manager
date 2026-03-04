@@ -1,3 +1,6 @@
+// ✅ [수정] Controllers/MainController.cs
+// 🔧 OnOrderbookReceived 이중 등록 버그 수정 → 단일 핸들러로 통합
+
 using ScottPlot;
 using System;
 using System.Collections.Generic;
@@ -7,6 +10,7 @@ using Upbit_Manager.Core;
 using Upbit_Manager.Core.Alarms;
 using Upbit_Manager.Core.Alarms.Conditions;
 using Upbit_Manager.Core.Automation;
+using Upbit_Manager.Core.Orderbook;
 using Upbit_Manager.Interfaces;
 using Upbit_Manager.Models.Common;
 using Upbit_Manager.Services;
@@ -20,7 +24,7 @@ namespace Upbit_Manager.Controllers
 {
     /// <summary>
     /// 애플리케이션의 중앙 오케스트레이터
-    /// 
+    ///
     /// 책임:
     /// - REST 초기 데이터 로딩
     /// - WebSocket 실시간 데이터 처리
@@ -49,7 +53,6 @@ namespace Upbit_Manager.Controllers
         private readonly BinanceSocketService _binanceSocket;
         private readonly BinanceRestService _binanceRest;
 
-        // 🔥 오더북 전용 브릿지 (Chart 직접 접근하지 않음)
         private readonly MMFBridgeService _mmfBridge;
 
         private readonly AlarmManager _alarmManager;
@@ -70,11 +73,16 @@ namespace Upbit_Manager.Controllers
 
         #endregion
 
+        private readonly OrderbookHeatmapEngine _heatmapEngine;
+
+        // 🔥 HeatmapForm에 직접 전달 (ChartManager 경유 불필요)
+        public Action<OrderbookSnapshot>? OnHeatmapSnapshot;
+
         public MainController(
             IRestService upbitRest,
             ExchangeRateService rateService,
             AccountManager accountManager,
-            ChartManager chartManager)
+            ChartManager chartManager, OrderbookHeatmapEngine heatmapEngine)
         {
             _upbitRest = upbitRest;
             _rateService = rateService;
@@ -86,12 +94,23 @@ namespace Upbit_Manager.Controllers
             _binanceRest = new BinanceRestService();
 
             _alarmManager = new AlarmManager();
-
-            // 🔥 ChartManager 주입 제거
             _mmfBridge = new MMFBridgeService();
 
             var orderManager = new OrderManager(upbitRest);
             _algoOrderManager = new AlgoOrderManager(orderManager);
+
+            // ✅ 내부에서 new() 하던 것 제거
+            _heatmapEngine = heatmapEngine;
+
+            _heatmapEngine.OnSpoofingDetected += e =>
+            {
+                Logger.Log($"[Spoofing 감지] {e.Side} | 가격: {e.Price:N0} | 잔량: {e.Volume:N0} | 지속: {e.Duration.TotalSeconds:F1}초");
+            };
+
+            _heatmapEngine.OnLargeOrderDetected += (price, volume, side) =>
+            {
+                Logger.Log($"[대량 호가] {side} | 가격: {price:N0} | 잔량: {volume:N0}");
+            };
 
             RegisterSocketEvents();
             RegisterMMFEvents();
@@ -102,32 +121,20 @@ namespace Upbit_Manager.Controllers
 
         private void RegisterSocketEvents()
         {
-            // 실시간 체결
             _upbitSocket.OnTradeUpdated += HandleRealtimeTrade;
 
-            // 실시간 캔들
             _upbitSocket.OnCandleUpdated += candle =>
             {
                 _chartManager.PushData(SeriesType.Candle, candle, ExchangeSource.Upbit);
                 _chartManager.PushData(SeriesType.Volume, candle, ExchangeSource.Upbit);
             };
 
-            // Binance 가격
             _binanceSocket.OnPriceUpdated += HandleBinanceRealtime;
         }
 
         private void RegisterMMFEvents()
         {
-            // 🔥 오더북 데이터 수신 → ChartManager로 전달만 수행
-            _mmfBridge.OnOrderbookReceived += (timestamp, units) =>
-            {
-                if (units.Length == 0)
-                    return;
 
-                _chartManager.PushOrderbook(timestamp, units);
-            };
-
-            // MMF 연결 상태 변경 감지
             _mmfBridge.OnConnectionStatusChanged += isConnected =>
             {
                 _isMMFConnected = isConnected;
@@ -137,6 +144,25 @@ namespace Upbit_Manager.Controllers
                     isConnected
                     ? "[시스템] 로컬 Collector(MMF) 오더북 모드 활성화"
                     : "[시스템] API 기반 데이터 모드 전환");
+            };
+
+            _mmfBridge.OnOrderbookReceived += (timestamp, units) =>
+            {
+                if (units.Length == 0) return;
+
+                _chartManager.PushOrderbook(timestamp, units);
+
+                var snapshot = new OrderbookSnapshot
+                {
+                    Time = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).LocalDateTime,
+                    TimestampMs = timestamp,
+                    Units = units,
+                    TotalAskSize = units.Sum(u => u.AskSize),
+                    TotalBidSize = units.Sum(u => u.BidSize)
+                };
+
+                // 🔥 ChartManager 대신 HeatmapForm으로 직접
+                OnHeatmapSnapshot?.Invoke(snapshot);
             };
         }
 
@@ -199,7 +225,7 @@ namespace Upbit_Manager.Controllers
 
             UpdateVolumeThreshold();
 
-            // 🔥 MMF는 프로그램 수명 동안 1회만 시작
+            // MMF는 프로그램 수명 동안 1회만 시작
             if (!_mmfStarted)
             {
                 _mmfBridge.Start();
@@ -223,9 +249,11 @@ namespace Upbit_Manager.Controllers
             string incomingMarket = market?.Trim().ToUpper() ?? "";
             _accountManager.UpdateCurrentPrice(incomingMarket, price);
 
+            // 체결 가격 → 히트맵 엔진에 주입 (스푸핑 판별용)
+            _heatmapEngine.RegisterTrade(price);
+
             if (incomingMarket == _selectedMarket)
             {
-                // 🔥 MMF가 오더북만 담당하므로 체결 틱은 항상 처리
                 _chartManager.EnqueueTick(price, vol, side);
 
                 _chartManager.PushData(

@@ -2,10 +2,7 @@ using Crypto.Collector.Shared;
 using ScottPlot;
 using ScottPlot.Plottables;
 using ScottPlot.WinForms;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Windows.Forms;
+using Upbit_Manager.Core.Orderbook;
 using Upbit_Manager.Interfaces;
 using Upbit_Manager.Models.Common;
 using Upbit_Manager.Models.Upbit;
@@ -24,11 +21,13 @@ namespace Upbit_Manager.UI
         #region Fields
 
         private readonly FormsPlot _formsPlot;
+        private readonly OrderbookHeatmapEngine _heatmapEngine;
 
         private Plot _pricePlot = null!;
         private Plot _volumePlot = null!;
         private Plot _orderbookPlot = null!;
-        private Plot _extraPlot1 = null!;
+        // 🔥 [추가] 4번째 패널 = 오더북 히트맵 전용
+        private Plot _heatmapPlot = null!;
         private Plot _extraPlot2 = null!;
 
         private readonly List<IChartSeries> _seriesList = new();
@@ -51,9 +50,10 @@ namespace Upbit_Manager.UI
 
         #region Constructor
 
-        public ChartManager(FormsPlot formsPlot)
+        public ChartManager(FormsPlot formsPlot, OrderbookHeatmapEngine heatmapEngine)
         {
             _formsPlot = formsPlot;
+            _heatmapEngine = heatmapEngine;
 
             InitializeSeries();
             SetupMultiplot();
@@ -74,13 +74,15 @@ namespace Upbit_Manager.UI
 
         /// <summary>
         /// Assembly에서 IChartSeries 구현체 자동 로딩
+        /// OrderbookHeatmapSeries는 생성자 주입이 필요하므로 Reflection 대상에서 제외 후 수동 등록
         /// </summary>
         private void InitializeSeries()
         {
             var types = typeof(IChartSeries).Assembly.GetTypes()
                 .Where(t => typeof(IChartSeries).IsAssignableFrom(t)
                             && !t.IsAbstract
-                            && !t.IsInterface);
+                            && !t.IsInterface
+                            && t != typeof(OrderbookHeatmapSeries)); // 🔥 Reflection 제외
 
             foreach (var type in types)
             {
@@ -90,6 +92,13 @@ namespace Upbit_Manager.UI
                     _seriesList.Add(series);
                 }
             }
+
+            // 🔥 [수동 등록] OrderbookHeatmapEngine 인스턴스 주입
+            var heatmapSeries = new OrderbookHeatmapSeries(_heatmapEngine)
+            {
+                IsVisible = true
+            };
+            _seriesList.Add(heatmapSeries);
         }
 
         public T? GetSeries<T>(ExchangeSource source, SeriesType type)
@@ -106,9 +115,7 @@ namespace Upbit_Manager.UI
 
         #region Public Data API
 
-        /// <summary>
-        /// 일반 데이터 전달
-        /// </summary>
+        /// <summary>일반 데이터 전달</summary>
         public void PushData(SeriesType type, object payload, ExchangeSource source)
         {
             lock (_dataLock)
@@ -121,9 +128,7 @@ namespace Upbit_Manager.UI
             }
         }
 
-        /// <summary>
-        /// 오더북 전용 전달 (MMF Bridge용)
-        /// </summary>
+        /// <summary>오더북 전용 전달 (MMF Bridge용)</summary>
         public void PushOrderbook(long timestamp, OrderbookUnit[] units)
         {
             var payload = new UpbitOrderbookPayload
@@ -144,9 +149,7 @@ namespace Upbit_Manager.UI
             }
         }
 
-        /// <summary>
-        /// 틱 큐 적재
-        /// </summary>
+        /// <summary>틱 큐 적재</summary>
         public void EnqueueTick(double price, double volume, string side)
         {
             lock (_tickQueue)
@@ -155,9 +158,7 @@ namespace Upbit_Manager.UI
             }
         }
 
-        /// <summary>
-        /// 초기 데이터 세팅
-        /// </summary>
+        /// <summary>초기 데이터 세팅</summary>
         public void InitializeWithData(
             string market,
             List<CommonCandle> candles,
@@ -174,7 +175,6 @@ namespace Upbit_Manager.UI
                     if (s.Type == SeriesType.Candle && s.Source == ExchangeSource.Upbit)
                         s.UpdateData(candles);
 
-                    // 추가
                     if (s.Type == SeriesType.Volume && s.Source == ExchangeSource.Upbit)
                         s.UpdateData(candles);
 
@@ -211,6 +211,10 @@ namespace Upbit_Manager.UI
             }
         }
 
+        // ✅ ChartManager.cs — UpdateUI() 부분만 교체
+        // 🔥 _heatmapPlot.Clear()를 매 프레임 호출하면 Heatmap Plottable이 제거되어
+        //    OrderbookHeatmapSeries 내부의 _heatmapPlottable 참조가 무효화됨 → 내용물 없음 원인
+
         public void UpdateUI()
         {
             if (_formsPlot.InvokeRequired)
@@ -223,18 +227,24 @@ namespace Upbit_Manager.UI
 
             lock (_dataLock)
             {
+                // 🔥 히트맵 플롯은 Clear() 제외 — Heatmap Plottable을 Series 내부에서 직접 관리
                 _pricePlot.Clear();
                 _volumePlot.Clear();
                 _orderbookPlot.Clear();
-                _extraPlot1.Clear();
+                // _heatmapPlot.Clear();  ← 제거: OrderbookHeatmapSeries.Render()가 직접 교체 관리
                 _extraPlot2.Clear();
 
                 foreach (var s in _seriesList.Where(x => x.IsVisible))
                 {
                     if (s.Type == SeriesType.Orderbook)
                         s.Render(_orderbookPlot, _orderbookPlot.Axes.Left);
+
+                    else if (s.Type == SeriesType.OrderbookHeatmap)
+                        s.Render(_heatmapPlot, _heatmapPlot.Axes.Left);
+
                     else if (s.TargetGroup == AxisGroup.Price)
                         s.Render(_pricePlot, _pricePlot.Axes.Left);
+
                     else
                         s.Render(_volumePlot, _volumePlot.Axes.Left);
                 }
@@ -243,7 +253,6 @@ namespace Upbit_Manager.UI
                     _pricePlot.Add.Plottable(_currentPriceLine);
 
                 ApplyAutoScroll();
-
                 _formsPlot.Refresh();
             }
         }
@@ -259,20 +268,23 @@ namespace Upbit_Manager.UI
             _pricePlot = _formsPlot.Multiplot.Subplots.GetPlot(0);
             _volumePlot = _formsPlot.Multiplot.Subplots.GetPlot(1);
             _orderbookPlot = _formsPlot.Multiplot.Subplots.GetPlot(2);
-            _extraPlot1 = _formsPlot.Multiplot.Subplots.GetPlot(3);
+            _heatmapPlot = _formsPlot.Multiplot.Subplots.GetPlot(3);  // 🔥 [수정] 히트맵 전용
             _extraPlot2 = _formsPlot.Multiplot.Subplots.GetPlot(4);
 
             _formsPlot.Multiplot.Layout = new FivePanelLayout();
 
-            // 우측 Y축 레이블 공간 고정 (자동 계산으로 인한 레이아웃 밀림 방지)
             _pricePlot.Layout.Fixed(new PixelPadding(left: 50, right: 80, bottom: 20, top: 10));
             _volumePlot.Layout.Fixed(new PixelPadding(left: 50, right: 80, bottom: 20, top: 10));
 
             ConfigurePlot(_pricePlot, "Price", true);
             ConfigurePlot(_volumePlot, "Volume", false);
             ConfigureSidePlot(_orderbookPlot, "Orderbook");
-            ConfigureSidePlot(_extraPlot1, "Extra1");
-            ConfigureSidePlot(_extraPlot2, "Extra2");
+            ConfigureSidePlot(_heatmapPlot, "Heatmap");  // 🔥 [수정] 타이틀 변경
+            ConfigureSidePlot(_extraPlot2, "Extra");
+            ConfigureTicks(_pricePlot);
+
+            // 🔥 [추가] 히트맵은 가격 차트와 X축(시간) 공유
+            _formsPlot.Multiplot.SharedAxes.ShareX([_pricePlot, _volumePlot, _heatmapPlot]);
         }
 
         private static void ConfigurePlot(Plot plot, string yLabel, bool showX)
@@ -290,6 +302,13 @@ namespace Upbit_Manager.UI
             plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
         }
 
+        private void ConfigureTicks(Plot plot)
+        {
+            var dtGen = new ScottPlot.TickGenerators.DateTimeAutomatic();
+            dtGen.LabelFormatter = dt => dt.ToString("HH:mm:ss");
+            plot.Axes.Bottom.TickGenerator = dtGen;
+        }
+
         #endregion
 
         #region Auto Scroll
@@ -304,11 +323,14 @@ namespace Upbit_Manager.UI
 
             _pricePlot.Axes.SetLimitsX(left, right);
             _volumePlot.Axes.SetLimitsX(left, right);
+            // 🔥 [추가] 히트맵도 동일한 X축 범위 적용 (SharedAxes로 자동이지만 명시적 보장)
+            _heatmapPlot.Axes.SetLimitsX(left, right);
 
             if (!_isYAxisLocked)
                 _pricePlot.Axes.AutoScaleY();
 
             _volumePlot.Axes.AutoScaleY();
+            _heatmapPlot.Axes.AutoScaleY(); // 🔥 [추가] 히트맵 Y축 자동 스케일
             _orderbookPlot.Axes.AutoScale();
         }
 
@@ -359,11 +381,10 @@ namespace Upbit_Manager.UI
             get
             {
                 lock (_dataLock)
-                {
                     return _seriesList.ToList();
-                }
             }
         }
+
         #endregion
     }
 }

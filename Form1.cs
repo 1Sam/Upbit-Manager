@@ -7,15 +7,16 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Upbit_Manager.Controllers;
 using Upbit_Manager.Core;
+using Upbit_Manager.Core;
+using Upbit_Manager.Core.Orderbook;
 using Upbit_Manager.Interfaces;
 using Upbit_Manager.Models.Common;
+using Upbit_Manager.Models.Upbit;
 using Upbit_Manager.Services;
 using Upbit_Manager.Services.Common;
 using Upbit_Manager.Services.Upbit;
 using Upbit_Manager.UI;
 using Upbit_Manager.UI.Series;
-using Upbit_Manager.Core;
-using Upbit_Manager.Models.Upbit;
 //using Upbit_Manager.UI;
 
 namespace Upbit_Manager
@@ -35,6 +36,8 @@ namespace Upbit_Manager
         private string _currentMarket = "KRW-ADA";
         private DateTime _lastFullUpdateTime = DateTime.MinValue;
         private bool _isApiValid = true;
+
+        private HeatmapForm? _heatmapForm;
 
         public Form1()
         {
@@ -64,12 +67,20 @@ namespace Upbit_Manager
 
             // 3. 핵심 객체 초기화
             _accountManager = new AccountManager();
-            _chartManager = new ChartManager(formsPlot1);
             _rateService = new ExchangeRateService();
             _upbitRestService = new UpbitRestService(ApiConfig.AccessKey, ApiConfig.SecretKey);
 
-            // ⭐ 컨트롤러 생성 (모든 엔진 제어권 포함)
-            _controller = new MainController(_upbitRestService, _rateService, _accountManager, _chartManager);
+            // ✅ [수정] OrderbookHeatmapEngine 먼저 생성 → ChartManager & MainController 공유 주입
+            var heatmapEngine = new OrderbookHeatmapEngine();
+
+            _chartManager = new ChartManager(formsPlot1, heatmapEngine);
+
+            _controller = new MainController(
+                _upbitRestService,
+                _rateService,
+                _accountManager,
+                _chartManager,
+                heatmapEngine);   // ✅ 동일 인스턴스 전달
 
             // 4. 컨트롤러 -> UI 이벤트 연결
             _controller.OnExchangeRateUpdated = (rate) =>
@@ -80,7 +91,8 @@ namespace Upbit_Manager
             // ⭐ 알람 통계 수치 업데이트 이벤트 연결
             _controller.OnVolumeStatsUpdated = (avg, threshold) =>
             {
-                this.InvokeIfRequired(() => {
+                this.InvokeIfRequired(() =>
+                {
                     lblCurrentAvg.Text = $"현재 20분 평균: {avg:N0}";
                     lblTargetVol.Text = $"알람 기준량: {threshold:N0}";
                 });
@@ -103,6 +115,12 @@ namespace Upbit_Manager
             SetupTimers();
             SetupAlarmControlHandlers();
 
+            _heatmapForm = new HeatmapForm(heatmapEngine);
+
+            _controller.OnHeatmapSnapshot = snapshot =>
+            {
+                _heatmapForm?.PushSnapshot(snapshot);
+            };
             // 7. 프로그램 초기 로직 실행
             InitProgram();
         }
@@ -169,18 +187,21 @@ namespace Upbit_Manager
         private void SetupAlarmControlHandlers()
         {
             // 배수 설정 변경 시
-            numVolMultiplier.ValueChanged += (s, e) => {
+            numVolMultiplier.ValueChanged += (s, e) =>
+            {
                 Logger.Log($"[설정] 거래량 감시 배수 변경: {numVolMultiplier.Value}배");
             };
 
             // 쿨타임 트랙바 변경 시
-            trkbCooldown.Scroll += (s, e) => {
+            trkbCooldown.Scroll += (s, e) =>
+            {
                 if (lblCooldownValue != null)
                     lblCooldownValue.Text = $"{trkbCooldown.Value}초";
             };
 
             // 알람 활성화 체크박스
-            chkAlarmEnable.CheckedChanged += (s, e) => {
+            chkAlarmEnable.CheckedChanged += (s, e) =>
+            {
                 string status = chkAlarmEnable.Checked ? "활성화" : "비활성화";
                 Logger.Log($"[설정] 실시간 알람 엔진 {status}");
             };
@@ -510,6 +531,17 @@ namespace Upbit_Manager
         }
 
         #endregion
+
+        private void tsHeatmap_Click(object sender, EventArgs e)
+        {
+            if (_heatmapForm == null) return;
+
+            // 메인 폼 우측에 배치
+            _heatmapForm.Location = new System.Drawing.Point(
+                this.Right, this.Top);
+            _heatmapForm.Show();
+            _heatmapForm.BringToFront();
+        }
     }
 
     /// <summary>
