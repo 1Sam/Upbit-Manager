@@ -1,4 +1,7 @@
-﻿using ScottPlot.WinForms;
+﻿// ✅ [수정] Form1.cs
+// 🔥 OnHeatmapHistorySnapshot, OnHeatmapHistoryCompleted 이벤트 연결 추가
+
+using ScottPlot.WinForms;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -6,7 +9,6 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Upbit_Manager.Controllers;
-using Upbit_Manager.Core;
 using Upbit_Manager.Core;
 using Upbit_Manager.Core.Orderbook;
 using Upbit_Manager.Interfaces;
@@ -17,13 +19,11 @@ using Upbit_Manager.Services.Common;
 using Upbit_Manager.Services.Upbit;
 using Upbit_Manager.UI;
 using Upbit_Manager.UI.Series;
-//using Upbit_Manager.UI;
 
 namespace Upbit_Manager
 {
     /// <summary>
-    /// 업비트 매니저 메인 윈도우 폼입니다.
-    /// 모든 UI 구성 요소와 컨트롤러 간의 이벤트를 중계하며 실시간 모니터링 및 알람 설정을 관리합니다.
+    /// 업비트 매니저 메인 윈도우 폼
     /// </summary>
     public partial class Form1 : Form
     {
@@ -43,7 +43,7 @@ namespace Upbit_Manager
         {
             InitializeComponent();
 
-            // 1. API 키 초기 설정 (저장된 키 로드)
+            // 1. API 키 초기 설정
             var startupKeys = ApiKeyStore.ReadKeys();
             if (startupKeys == null)
             {
@@ -60,7 +60,7 @@ namespace Upbit_Manager
                 ApiConfig.SecretKey = startupKeys.Value.secret;
             }
 
-            // 2. DataGridView 더블버퍼링 (깜빡임 방지)
+            // 2. DataGridView 더블버퍼링
             typeof(DataGridView).GetProperty("DoubleBuffered",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
                 ?.SetValue(dataGridView1, true, null);
@@ -70,7 +70,6 @@ namespace Upbit_Manager
             _rateService = new ExchangeRateService();
             _upbitRestService = new UpbitRestService(ApiConfig.AccessKey, ApiConfig.SecretKey);
 
-            // ✅ [수정] OrderbookHeatmapEngine 먼저 생성 → ChartManager & MainController 공유 주입
             var heatmapEngine = new OrderbookHeatmapEngine();
 
             _chartManager = new ChartManager(formsPlot1, heatmapEngine);
@@ -80,61 +79,61 @@ namespace Upbit_Manager
                 _rateService,
                 _accountManager,
                 _chartManager,
-                heatmapEngine);   // ✅ 동일 인스턴스 전달
+                heatmapEngine);
 
-            // 4. 컨트롤러 -> UI 이벤트 연결
-            _controller.OnExchangeRateUpdated = (rate) =>
-            {
+            // 4. 컨트롤러 → UI 이벤트 연결
+            _controller.OnExchangeRateUpdated = rate =>
                 this.InvokeIfRequired(() => UpdateRateLabel(rate));
-            };
 
-            // ⭐ 알람 통계 수치 업데이트 이벤트 연결
             _controller.OnVolumeStatsUpdated = (avg, threshold) =>
-            {
                 this.InvokeIfRequired(() =>
                 {
                     lblCurrentAvg.Text = $"현재 20분 평균: {avg:N0}";
                     lblTargetVol.Text = $"알람 기준량: {threshold:N0}";
                 });
-            };
 
-            Logger.OnLogAdded += (logLine) =>
-            {
+            Logger.OnLogAdded += logLine =>
                 this.InvokeIfRequired(() => UpdateLogTextBox(logLine));
-            };
 
-            // 5. 폼 공통 이벤트 핸들러 등록
+            // 5. 폼 이벤트 핸들러 등록
             this.FormClosing += Form1_FormClosing;
             this.toolStripStatusLabel1.Click += toolStripStatusLabel1_Click;
             this.toolStripStatusLabel1.DoubleClick += toolStripStatusLabel1_DoubleClick;
 
-            // 6. UI 초기화 및 타이머 시작
+            // 6. UI 초기화
             SetupDataGridView();
             InitLogDisplay();
             InitChartSeriesList();
             SetupTimers();
             SetupAlarmControlHandlers();
 
+            // 7. HeatmapForm 생성 및 이벤트 연결
             _heatmapForm = new HeatmapForm(heatmapEngine);
 
+            // 실시간 스냅샷
             _controller.OnHeatmapSnapshot = snapshot =>
-            {
                 _heatmapForm?.PushSnapshot(snapshot);
-            };
-            // 7. 프로그램 초기 로직 실행
+
+            // 🔥 히스토리 배치 스냅샷 (렌더링 스킵)
+            _controller.OnHeatmapHistorySnapshot = snapshot =>
+                _heatmapForm?.PushHistorySnapshot(snapshot);
+
+            // 🔥 히스토리 소진 완료 → 렌더링 1회 트리거
+            _controller.OnHeatmapHistoryCompleted = () =>
+                _heatmapForm?.OnHistoryCompleted();
+
+            // 8. 프로그램 초기화
             InitProgram();
         }
 
-        #region [초기화 및 시스템 설정]
+        #region [ 초기화 및 시스템 설정 ]
 
         private void SetupTimers()
         {
-            // 차트 UI 갱신 (100ms)
             var uiTimer = new System.Windows.Forms.Timer { Interval = 100 };
             uiTimer.Tick += (s, e) => _chartManager.UpdateUI();
             uiTimer.Start();
 
-            // 데이터 갱신 (500ms)
             var mainDataTimer = new System.Windows.Forms.Timer { Interval = 500 };
             mainDataTimer.Tick += async (s, e) => await DoMainUpdate();
             mainDataTimer.Start();
@@ -144,9 +143,7 @@ namespace Upbit_Manager
         {
             checkedListBox_ChartSeries.Items.Clear();
             foreach (var series in _chartManager.SeriesList)
-            {
                 checkedListBox_ChartSeries.Items.Add(series, series.DefaultOn);
-            }
 
             checkedListBox_ChartSeries.ItemCheck += async (s, e) =>
             {
@@ -156,9 +153,7 @@ namespace Upbit_Manager
                     series.IsVisible = isChecked;
 
                     if (series.Source == ExchangeSource.Binance && series.Type == SeriesType.PriceLine)
-                    {
                         await _controller.ToggleBinanceService(isChecked);
-                    }
 
                     _chartManager.UpdateUI();
                 }
@@ -181,25 +176,17 @@ namespace Upbit_Manager
             dataGridView1.AllowUserToAddRows = false;
         }
 
-        /// <summary>
-        /// 알람 설정 UI 컨트롤들의 이벤트 핸들러를 설정합니다.
-        /// </summary>
         private void SetupAlarmControlHandlers()
         {
-            // 배수 설정 변경 시
             numVolMultiplier.ValueChanged += (s, e) =>
-            {
                 Logger.Log($"[설정] 거래량 감시 배수 변경: {numVolMultiplier.Value}배");
-            };
 
-            // 쿨타임 트랙바 변경 시
             trkbCooldown.Scroll += (s, e) =>
             {
                 if (lblCooldownValue != null)
                     lblCooldownValue.Text = $"{trkbCooldown.Value}초";
             };
 
-            // 알람 활성화 체크박스
             chkAlarmEnable.CheckedChanged += (s, e) =>
             {
                 string status = chkAlarmEnable.Checked ? "활성화" : "비활성화";
@@ -209,7 +196,7 @@ namespace Upbit_Manager
 
         #endregion
 
-        #region [데이터 갱신 루프]
+        #region [ 데이터 갱신 루프 ]
 
         private async void InitProgram()
         {
@@ -258,9 +245,7 @@ namespace Upbit_Manager
 
                     string orderJson = await _upbitRestService.GetOpenOrdersJsonAsync();
                     if (!orderJson.StartsWith("ERROR_MSG:"))
-                    {
                         _accountManager.UpdateOpenOrders(orderJson);
-                    }
                 }
                 catch (Exception ex)
                 {
@@ -354,7 +339,7 @@ namespace Upbit_Manager
 
         #endregion
 
-        #region [컴포넌트 이벤트 핸들러]
+        #region [ 컴포넌트 이벤트 핸들러 ]
 
         private void dataGridView1_CellClick(object sender, DataGridViewCellEventArgs e)
         {
@@ -380,7 +365,10 @@ namespace Upbit_Manager
                 return;
             }
 
-            if (MessageBox.Show($"{_currentMarket} 종목을 현재가 {currentPrice:N0}원 기준으로 일괄 매수(그리드) 하시겠습니까?", "일괄 매수 확인", MessageBoxButtons.YesNo) == DialogResult.Yes)
+            if (MessageBox.Show(
+                    $"{_currentMarket} 종목을 현재가 {currentPrice:N0}원 기준으로 일괄 매수(그리드) 하시겠습니까?",
+                    "일괄 매수 확인",
+                    MessageBoxButtons.YesNo) == DialogResult.Yes)
             {
                 await _controller.ExecuteBatchPurchase(currentPrice);
             }
@@ -420,10 +408,8 @@ namespace Upbit_Manager
             }
         }
 
-        private void toolStripMenuItem2_Click(object sender, EventArgs e)
-        {
+        private void toolStripMenuItem2_Click(object sender, EventArgs e) =>
             ShowApiKeyDialog("API Key 수정");
-        }
 
         private void flowToolStripMenuItem_Click(object sender, EventArgs e)
         {
@@ -431,10 +417,8 @@ namespace Upbit_Manager
             formsPlot1.Focus();
         }
 
-        private void UpdateRateLabel(double rate)
-        {
+        private void UpdateRateLabel(double rate) =>
             toolStripStatusLabel2.Text = $"현재 환율: {rate:N2} KRW/USD";
-        }
 
         private void UpdateLogTextBox(string newLog)
         {
@@ -472,7 +456,8 @@ namespace Upbit_Manager
         private void HandleStatusLabelInteraction()
         {
             string statusText = toolStripStatusLabel1.Text;
-            var match = System.Text.RegularExpressions.Regex.Match(statusText, @"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}");
+            var match = System.Text.RegularExpressions.Regex.Match(
+                statusText, @"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}");
 
             if (!match.Success) return;
 
@@ -525,9 +510,7 @@ namespace Upbit_Manager
         private void Form1_Load(object sender, EventArgs e)
         {
             if (cmbAlarmSound != null && cmbAlarmSound.Items.Count > 0)
-            {
                 cmbAlarmSound.SelectedIndex = 0;
-            }
         }
 
         #endregion
@@ -536,16 +519,13 @@ namespace Upbit_Manager
         {
             if (_heatmapForm == null) return;
 
-            // 메인 폼 우측에 배치
             _heatmapForm.Location = new Point(this.Right + 5, this.Top);
             _heatmapForm.Show();
             _heatmapForm.BringToFront();
+            _heatmapForm.ForceRefresh();
         }
     }
 
-    /// <summary>
-    /// UI 컨트롤 접근을 위한 확장 메서드입니다.
-    /// </summary>
     public static class ControlExtensions
     {
         public static void InvokeIfRequired(this Control control, Action action)

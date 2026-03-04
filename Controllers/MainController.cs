@@ -1,5 +1,6 @@
 // ✅ [수정] Controllers/MainController.cs
-// 🔧 OnOrderbookReceived 이중 등록 버그 수정 → 단일 핸들러로 통합
+// 🔥 OnHeatmapHistorySnapshot, OnHeatmapHistoryCompleted 이벤트 추가
+// 🔥 RegisterMMFEvents()에 히스토리 이벤트 연결
 
 using ScottPlot;
 using System;
@@ -24,13 +25,6 @@ namespace Upbit_Manager.Controllers
 {
     /// <summary>
     /// 애플리케이션의 중앙 오케스트레이터
-    ///
-    /// 책임:
-    /// - REST 초기 데이터 로딩
-    /// - WebSocket 실시간 데이터 처리
-    /// - MMF 오더북 데이터 수신 및 전달
-    /// - ChartManager로 데이터 전달
-    /// - 알람 및 자동매매 엔진 제어
     /// </summary>
     public class MainController
     {
@@ -39,6 +33,11 @@ namespace Upbit_Manager.Controllers
         public Action<double>? OnExchangeRateUpdated;
         public Action<double, double>? OnVolumeStatsUpdated;
         public Action<bool>? OnMMFStatusChanged;
+
+        // 🔥 히트맵 이벤트
+        public Action<OrderbookSnapshot>? OnHeatmapSnapshot;          // 실시간
+        public Action<OrderbookSnapshot>? OnHeatmapHistorySnapshot;   // 🔥 히스토리 배치
+        public Action? OnHeatmapHistoryCompleted;  // 🔥 히스토리 소진 완료
 
         #endregion
 
@@ -54,7 +53,6 @@ namespace Upbit_Manager.Controllers
         private readonly BinanceRestService _binanceRest;
 
         private readonly MMFBridgeService _mmfBridge;
-
         private readonly AlarmManager _alarmManager;
         private readonly AlgoOrderManager _algoOrderManager;
 
@@ -75,19 +73,18 @@ namespace Upbit_Manager.Controllers
 
         private readonly OrderbookHeatmapEngine _heatmapEngine;
 
-        // 🔥 HeatmapForm에 직접 전달 (ChartManager 경유 불필요)
-        public Action<OrderbookSnapshot>? OnHeatmapSnapshot;
-
         public MainController(
             IRestService upbitRest,
             ExchangeRateService rateService,
             AccountManager accountManager,
-            ChartManager chartManager, OrderbookHeatmapEngine heatmapEngine)
+            ChartManager chartManager,
+            OrderbookHeatmapEngine heatmapEngine)
         {
             _upbitRest = upbitRest;
             _rateService = rateService;
             _accountManager = accountManager;
             _chartManager = chartManager;
+            _heatmapEngine = heatmapEngine;
 
             _upbitSocket = new UpbitSocketService();
             _binanceSocket = new BinanceSocketService();
@@ -98,9 +95,6 @@ namespace Upbit_Manager.Controllers
 
             var orderManager = new OrderManager(upbitRest);
             _algoOrderManager = new AlgoOrderManager(orderManager);
-
-            // ✅ 내부에서 new() 하던 것 제거
-            _heatmapEngine = heatmapEngine;
 
             _heatmapEngine.OnSpoofingDetected += e =>
             {
@@ -134,36 +128,54 @@ namespace Upbit_Manager.Controllers
 
         private void RegisterMMFEvents()
         {
+            // ── 실시간 오더북 ───────────────────────────────────
             _mmfBridge.OnOrderbookReceived += (timestamp, units) =>
             {
                 if (units.Length == 0) return;
 
                 _chartManager.PushOrderbook(timestamp, units);
 
-                var snapshot = new OrderbookSnapshot
-                {
-                    Time = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).LocalDateTime,
-                    TimestampMs = timestamp,
-                    Units = units,
-                    TotalAskSize = units.Sum(u => u.AskSize),
-                    TotalBidSize = units.Sum(u => u.BidSize)
-                };
-
-                // 🔥 ChartManager 대신 HeatmapForm으로 직접
+                var snapshot = BuildSnapshot(timestamp, units);
                 OnHeatmapSnapshot?.Invoke(snapshot);
             };
 
+            // 🔥 히스토리 배치 (렌더링 스킵용)
+            _mmfBridge.OnHistorySnapshotReceived += (timestamp, units) =>
+            {
+                if (units.Length == 0) return;
+
+                var snapshot = BuildSnapshot(timestamp, units);
+                OnHeatmapHistorySnapshot?.Invoke(snapshot);
+            };
+
+            // 🔥 히스토리 소진 완료
+            _mmfBridge.OnHistoryLoadCompleted += () =>
+            {
+                OnHeatmapHistoryCompleted?.Invoke();
+            };
+
+            // ── 연결 상태 ────────────────────────────────────────
             _mmfBridge.OnConnectionStatusChanged += isConnected =>
             {
                 _isMMFConnected = isConnected;
                 OnMMFStatusChanged?.Invoke(isConnected);
 
-                Logger.Log(
-                    isConnected
+                Logger.Log(isConnected
                     ? "[시스템] 로컬 Collector(MMF) 오더북 모드 활성화"
                     : "[시스템] API 기반 데이터 모드 전환");
             };
         }
+
+        /// <summary>timestamp + units → OrderbookSnapshot 변환 헬퍼</summary>
+        private static OrderbookSnapshot BuildSnapshot(long timestamp, Crypto.Collector.Shared.OrderbookUnit[] units)
+            => new OrderbookSnapshot
+            {
+                Time = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).LocalDateTime,
+                TimestampMs = timestamp,
+                Units = units,
+                TotalAskSize = units.Sum(u => u.AskSize),
+                TotalBidSize = units.Sum(u => u.BidSize)
+            };
 
         private void RegisterAlarmEvents()
         {
@@ -224,7 +236,6 @@ namespace Upbit_Manager.Controllers
 
             UpdateVolumeThreshold();
 
-            // MMF는 프로그램 수명 동안 1회만 시작
             if (!_mmfStarted)
             {
                 _mmfBridge.Start();
@@ -248,7 +259,6 @@ namespace Upbit_Manager.Controllers
             string incomingMarket = market?.Trim().ToUpper() ?? "";
             _accountManager.UpdateCurrentPrice(incomingMarket, price);
 
-            // 체결 가격 → 히트맵 엔진에 주입 (스푸핑 판별용)
             _heatmapEngine.RegisterTrade(price);
 
             if (incomingMarket == _selectedMarket)
@@ -328,8 +338,7 @@ namespace Upbit_Manager.Controllers
 
         private void UpdateVolumeThreshold()
         {
-            if (_currentUpbitCandleSeries == null)
-                return;
+            if (_currentUpbitCandleSeries == null) return;
 
             double avgVol = _currentUpbitCandleSeries.GetAverageVolume(20);
             double threshold = avgVol * _volAlarmMultiplier;
@@ -351,7 +360,6 @@ namespace Upbit_Manager.Controllers
                     CooldownSeconds = 60,
                     IsDiscordNotify = true
                 };
-
                 _alarmManager.AddAlarm(volAlarm);
             }
 
@@ -364,7 +372,6 @@ namespace Upbit_Manager.Controllers
                 {
                     CooldownSeconds = 300
                 };
-
                 _alarmManager.AddAlarm(priceAlarm);
             }
         }

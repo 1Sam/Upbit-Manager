@@ -39,7 +39,7 @@ namespace Upbit_Manager.Core
                 string filePath = Path.Combine(LogDirectory, fileName);
 
                 // 실제 파일에는 줄바꿈을 포함한 원본 메시지 기록
-                File.AppendAllText(filePath, $"[{logTime}] [{level}] {message}{Environment.NewLine}");
+                File.AppendAllTextAsync(filePath, $"[{logTime}] [{level}] {message}{Environment.NewLine}");
             }
             catch (Exception ex)
             {

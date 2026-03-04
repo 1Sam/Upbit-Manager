@@ -1,43 +1,44 @@
-﻿// ✅ [신규] UI/HeatmapForm.cs
-// 🔥 오더북 히트맵 전용 독립 폼
-//    - 메인 폼과 UI 스레드 공유하지만 렌더링 부하를 분산
-//    - OrderbookHeatmapEngine 인스턴스를 메인과 공유 (데이터 동기화 불필요)
+﻿// ✅ [수정] HeatmapForm.cs
+// 🔥 히스토리 배치 수신: PushHistorySnapshot() → 엔진에만 주입, 렌더링 스킵
+// 🔥 히스토리 완료: OnHistoryCompleted() → 렌더링 1회 강제 실행
+// 🔥 X축: 6시간 범위 표시
 
 using ScottPlot;
 using ScottPlot.WinForms;
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Upbit_Manager.Core;
 using Upbit_Manager.Core.Orderbook;
 
-namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
+namespace Upbit_Manager
 {
-    public sealed partial class HeatmapForm : Form   // ✅ Form 명시 상속
+    public sealed partial class HeatmapForm : Form
     {
         #region [ 필드 ]
 
         private readonly OrderbookHeatmapEngine _engine;
         private readonly FormsPlot _formsPlot;
 
-        // 🔥 렌더링 쓰로틀 (500ms = 초당 2회)
         private const int RenderIntervalMs = 500;
         private System.Windows.Forms.Timer _renderTimer = null!;
 
-        // 백그라운드 계산 결과
         private readonly object _resultLock = new();
         private RenderPayload? _pending = null;
         private bool _hasNew = false;
 
-        // 백그라운드 계산 제어
         private readonly object _calcLock = new();
         private bool _isCalculating = false;
         private bool _calcRequested = false;
 
-        // ScottPlot
         private ScottPlot.Plottables.Heatmap? _heatmapPlottable;
+
+        // 🔥 사용자 수동줌 추적
+        private bool _userManualZoom = false;
+
+        // 🔥 히스토리 로딩 중 여부 (렌더링 타이머 차단용)
+        private volatile bool _isLoadingHistory = false;
 
         #endregion
 
@@ -47,44 +48,46 @@ namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
         {
             _engine = engine;
 
-            // ── 폼 기본 설정 ──────────────────────────
             Text = "오더북 히트맵";
-            Size = new System.Drawing.Size(1000, 600);
+            Size = new System.Drawing.Size(1400, 700);
             MinimumSize = new System.Drawing.Size(600, 400);
             StartPosition = FormStartPosition.Manual;
             FormBorderStyle = FormBorderStyle.Sizable;
 
-            // ── FormsPlot 생성 ────────────────────────
-            _formsPlot = new FormsPlot
-            {
-                Dock = DockStyle.Fill
-            };
+            _formsPlot = new FormsPlot { Dock = DockStyle.Fill };
             Controls.Add(_formsPlot);
 
-            // ── 차트 초기 설정 ────────────────────────
             SetupPlot();
 
-            // ── 렌더 타이머 (500ms) ───────────────────
             _renderTimer = new System.Windows.Forms.Timer { Interval = RenderIntervalMs };
             _renderTimer.Tick += (_, _) => TryRender();
             _renderTimer.Start();
 
-            // ── 폼 닫기 → 숨기기로 재정의 ────────────
             FormClosing += (_, e) =>
             {
                 e.Cancel = true;
                 Hide();
             };
 
-            // ── 마우스 우클릭 → 줌 리셋 ─────────────
+            // 우클릭 → 줌 리셋
             _formsPlot.MouseClick += (_, e) =>
             {
                 if (e.Button == MouseButtons.Right)
                 {
-                    _formsPlot.Plot.Axes.AutoScale();
-                    _formsPlot.Refresh();
+                    _userManualZoom = false;
+                    lock (_resultLock)
+                    {
+                        if (_pending != null) _hasNew = true;
+                    }
                 }
             };
+
+            _formsPlot.MouseMove += (_, e) =>
+            {
+                if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Middle)
+                    _userManualZoom = true;
+            };
+            _formsPlot.MouseWheel += (_, _) => _userManualZoom = true;
         }
 
         #endregion
@@ -95,17 +98,26 @@ namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
         {
             var plot = _formsPlot.Plot;
 
-            plot.Title("오더북 히트맵  |  노랑/흰색: 활성잔량  |  초록: 체결소멸  |  빨강: Spoofing의심");
-            plot.XLabel("시간");
-            plot.YLabel("가격 (KRW)");
+            plot.Title("Orderbook Heatmap  |  Yellow/White: Active Orders  |  Green: Filled/Expired  |  Red: Spoofing Suspected");
+            plot.XLabel("Time");
+            plot.YLabel("Price (KRW)");
 
-            // X축 시간 포맷
             plot.Axes.DateTimeTicksBottom();
             var dtGen = new ScottPlot.TickGenerators.DateTimeAutomatic();
-            dtGen.LabelFormatter = dt => dt.ToString("HH:mm");
+            dtGen.LabelFormatter = dt =>
+                dt.Hour == 0 && dt.Minute == 0
+                    ? dt.ToString("MM/dd\n00:00")
+                    : dt.ToString("HH:mm");
             plot.Axes.Bottom.TickGenerator = dtGen;
 
-            // 다크 테마 (히트맵 색상이 잘 보이도록)
+            // 🔥 초기 X축: 현재 기준 과거 6시간 ~ 미래 2분
+            double now = DateTime.Now.ToOADate();
+            plot.Axes.SetLimitsX(
+                now - TimeSpan.FromHours(6).TotalDays,
+                now + TimeSpan.FromMinutes(2).TotalDays);
+
+            plot.Axes.SetLimitsY(0, 1000);
+
             plot.FigureBackground.Color = ScottPlot.Color.FromHex("#1e1e1e");
             plot.DataBackground.Color = ScottPlot.Color.FromHex("#252526");
             plot.Axes.Color(ScottPlot.Color.FromHex("#d4d4d4"));
@@ -113,22 +125,41 @@ namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
 
         #endregion
 
-        #region [ 데이터 수신 (외부에서 호출) ]
+        #region [ 데이터 수신 ]
 
         /// <summary>
-        /// MainController에서 오더북 스냅샷 수신 시 호출
-        /// 백그라운드에서 배열 계산 후 다음 렌더 타이머에서 반영
+        /// 실시간 스냅샷 수신 (MainController → 여기)
+        /// 엔진 처리 + 렌더링 계산 요청
         /// </summary>
         public void PushSnapshot(OrderbookSnapshot snapshot)
         {
-            // 🔥 엔진에 직접 처리 (MainController에서 안 하므로 여기서)
+            if (_isLoadingHistory) return; // 히스토리 로딩 중엔 실시간 스킵
+
             _engine.ProcessSnapshot(snapshot);
+            RequestBackgroundCalc();
+        }
 
-            // 🔥 진단
-            var cells = _engine.GetCells();
-            if (cells.Count > 0)
-                Logger.Log($"[Heatmap] 셀 수: {cells.Count}");
+        /// <summary>
+        /// 🔥 히스토리 스냅샷 수신 (MMFBridgeService.OnHistorySnapshotReceived)
+        /// 렌더링 없이 엔진에만 데이터 주입
+        /// </summary>
+        public void PushHistorySnapshot(OrderbookSnapshot snapshot)
+        {
+            _isLoadingHistory = true;
+            _engine.ProcessSnapshot(snapshot);
+            // 렌더링 요청 없음 → UI 블로킹 없음
+        }
 
+        /// <summary>
+        /// 🔥 히스토리 소진 완료 콜백 (MMFBridgeService.OnHistoryLoadCompleted)
+        /// 렌더링 1회 강제 실행
+        /// </summary>
+        public void OnHistoryCompleted()
+        {
+            _isLoadingHistory = false;
+            Logger.Log("[Heatmap] 히스토리 로드 완료 → 렌더링 시작");
+
+            // 백그라운드에서 배열 계산 후 렌더링
             RequestBackgroundCalc();
         }
 
@@ -226,7 +257,9 @@ namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
 
         private void TryRender()
         {
-            if (!IsHandleCreated || !Visible) return;
+            // 🔥 히스토리 로딩 중엔 렌더링 타이머 스킵
+            if (_isLoadingHistory) return;
+            if (!IsHandleCreated) return;
 
             RenderPayload? payload;
             lock (_resultLock)
@@ -244,12 +277,11 @@ namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
                 {
                     plot.Remove(_heatmapPlottable);
                     _heatmapPlottable = null;
-                    _formsPlot.Refresh();
+                    if (Visible) _formsPlot.Refresh();
                 }
                 return;
             }
 
-            // 🔥 기존 Heatmap 교체
             if (_heatmapPlottable != null)
                 plot.Remove(_heatmapPlottable);
 
@@ -264,12 +296,30 @@ namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
             _heatmapPlottable.Colormap = new ScottPlot.Colormaps.Viridis();
             _heatmapPlottable.FlipVertically = false;
 
-            // Y축 자동 스케일 (가격 범위에 맞게)
-            plot.Axes.SetLimitsY(payload.YMin, payload.YMax);
+            if (!_userManualZoom)
+            {
+                double now = DateTime.Now.ToOADate();
+                double xPadding = TimeSpan.FromMinutes(1).TotalDays;
+                double xLeft = now - TimeSpan.FromHours(6).TotalDays;
+                double xMin = Math.Min(payload.XMin, xLeft);
+                plot.Axes.SetLimitsX(xMin, now + xPadding);
+                plot.Axes.SetLimitsY(payload.YMin - 2, payload.YMax + 2);
+            }
 
-            // 🔥 Visible일 때만 화면 갱신
-            if (Visible)
-                _formsPlot.Refresh();
+            if (Visible) _formsPlot.Refresh();
+        }
+
+        #endregion
+
+        #region [ 외부 호출 ]
+
+        public void ForceRefresh()
+        {
+            _userManualZoom = false;
+            lock (_resultLock)
+            {
+                if (_pending != null) _hasNew = true;
+            }
         }
 
         #endregion

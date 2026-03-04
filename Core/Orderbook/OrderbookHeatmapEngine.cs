@@ -28,7 +28,8 @@ namespace Upbit_Manager.Core.Orderbook
         public int TimeBucketSeconds { get; set; } = 5;
 
         /// <summary>히트맵 보관 시간 (분)</summary>
-        public int HistoryMinutes { get; set; } = 60;
+        // OrderbookHeatmapEngine.cs
+        public int HistoryMinutes { get; set; } = 360; // 🔥 필요하면 360(6시간)으로 늘리기
 
         /// <summary>Spoofing 감지 임계 시간 (초)</summary>
         public int SpoofingThresholdSeconds { get; set; } = 15;
@@ -68,6 +69,8 @@ namespace Upbit_Manager.Core.Orderbook
 
         #endregion
 
+        // 🔥 히스토리 로딩 중 Prune 스킵
+        public bool IsLoadingHistory { get; set; } = false;
 
 
         #region [ 공개 API ]
@@ -303,6 +306,9 @@ namespace Upbit_Manager.Core.Orderbook
 
         private void PruneOldCells()
         {
+            // 🔥 히스토리 로딩 중엔 Prune 스킵
+            if (IsLoadingHistory) return;
+
             double cutoff = DateTime.Now
                 .AddMinutes(-HistoryMinutes)
                 .ToOADate();

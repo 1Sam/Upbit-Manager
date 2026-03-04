@@ -81,8 +81,8 @@ namespace Upbit_Manager.UI
             var types = typeof(IChartSeries).Assembly.GetTypes()
                 .Where(t => typeof(IChartSeries).IsAssignableFrom(t)
                             && !t.IsAbstract
-                            && !t.IsInterface
-                            && t != typeof(OrderbookHeatmapSeries)); // 🔥 Reflection 제외
+                            && !t.IsInterface);
+                            //&& t != typeof(OrderbookHeatmapSeries)); // 🔥 Reflection 제외
 
             foreach (var type in types)
             {
@@ -93,12 +93,12 @@ namespace Upbit_Manager.UI
                 }
             }
 
-            // 🔥 [수동 등록] OrderbookHeatmapEngine 인스턴스 주입
-            var heatmapSeries = new OrderbookHeatmapSeries(_heatmapEngine)
-            {
-                IsVisible = true
-            };
-            _seriesList.Add(heatmapSeries);
+            //// 🔥 [수동 등록] OrderbookHeatmapEngine 인스턴스 주입
+            //var heatmapSeries = new OrderbookHeatmapSeries(_heatmapEngine)
+            //{
+            //    IsVisible = true
+            //};
+            //_seriesList.Add(heatmapSeries);
         }
 
         public T? GetSeries<T>(ExchangeSource source, SeriesType type)
@@ -239,8 +239,8 @@ namespace Upbit_Manager.UI
                     if (s.Type == SeriesType.Orderbook)
                         s.Render(_orderbookPlot, _orderbookPlot.Axes.Left);
 
-                    else if (s.Type == SeriesType.OrderbookHeatmap)
-                        s.Render(_heatmapPlot, _heatmapPlot.Axes.Left);
+                    //else if (s.Type == SeriesType.OrderbookHeatmap)
+                    //    s.Render(_heatmapPlot, _heatmapPlot.Axes.Left);
 
                     else if (s.TargetGroup == AxisGroup.Price)
                         s.Render(_pricePlot, _pricePlot.Axes.Left);
