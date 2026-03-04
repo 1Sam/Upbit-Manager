@@ -537,8 +537,7 @@ namespace Upbit_Manager
             if (_heatmapForm == null) return;
 
             // 메인 폼 우측에 배치
-            _heatmapForm.Location = new System.Drawing.Point(
-                this.Right, this.Top);
+            _heatmapForm.Location = new Point(this.Right + 5, this.Top);
             _heatmapForm.Show();
             _heatmapForm.BringToFront();
         }

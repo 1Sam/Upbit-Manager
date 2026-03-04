@@ -134,18 +134,6 @@ namespace Upbit_Manager.Controllers
 
         private void RegisterMMFEvents()
         {
-
-            _mmfBridge.OnConnectionStatusChanged += isConnected =>
-            {
-                _isMMFConnected = isConnected;
-                OnMMFStatusChanged?.Invoke(isConnected);
-
-                Logger.Log(
-                    isConnected
-                    ? "[시스템] 로컬 Collector(MMF) 오더북 모드 활성화"
-                    : "[시스템] API 기반 데이터 모드 전환");
-            };
-
             _mmfBridge.OnOrderbookReceived += (timestamp, units) =>
             {
                 if (units.Length == 0) return;
@@ -163,6 +151,17 @@ namespace Upbit_Manager.Controllers
 
                 // 🔥 ChartManager 대신 HeatmapForm으로 직접
                 OnHeatmapSnapshot?.Invoke(snapshot);
+            };
+
+            _mmfBridge.OnConnectionStatusChanged += isConnected =>
+            {
+                _isMMFConnected = isConnected;
+                OnMMFStatusChanged?.Invoke(isConnected);
+
+                Logger.Log(
+                    isConnected
+                    ? "[시스템] 로컬 Collector(MMF) 오더북 모드 활성화"
+                    : "[시스템] API 기반 데이터 모드 전환");
             };
         }
 

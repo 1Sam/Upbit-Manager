@@ -3,6 +3,7 @@ using System;
 using System.IO.MemoryMappedFiles;
 using System.Threading;
 using System.Threading.Tasks;
+using Upbit_Manager.Core;
 
 namespace Upbit_Manager.Services
 {
@@ -63,6 +64,7 @@ namespace Upbit_Manager.Services
         /// </summary>
         private async Task MonitorLoop(CancellationToken token)
         {
+
             while (!token.IsCancellationRequested)
             {
                 try
@@ -78,6 +80,9 @@ namespace Upbit_Manager.Services
                 }
                 catch (FileNotFoundException)
                 {
+                    // 🔥 [진단] MMF 못 찾음 = Collector 미실행 or 이름 불일치
+                    Logger.Log($"[MMF] 파일 없음 - Collector 미실행 또는 MMF 이름 불일치: {MMF_NAME}");
+
                     // Collector 미실행 상태
                     UpdateConnectionStatus(false);
                 }
@@ -98,6 +103,7 @@ namespace Upbit_Manager.Services
         /// </summary>
         private async Task ReadLoop(CancellationToken token)
         {
+
             if (_accessor == null)
                 return;
 
@@ -145,6 +151,10 @@ namespace Upbit_Manager.Services
                         units,
                         0,
                         depth);
+
+                    // 5️⃣ 외부로 이벤트 발행
+                    // 🔥 [진단] 실제 데이터 수신 확인
+                    Logger.Log($"[MMF] 데이터 수신: timestamp={timestamp}, depth={depth}");
 
                     // 5️⃣ 외부로 이벤트 발행
                     OnOrderbookReceived?.Invoke(timestamp, units);

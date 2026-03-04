@@ -52,8 +52,10 @@ namespace Upbit_Manager.Core.Orderbook
         private readonly object _lock = new();
 
         private OrderbookSnapshot? _prevSnapshot;
-        private double _avgUnitVolume = 100.0; // 초기 평균값
-
+        //private double _avgUnitVolume = 100.0; // 초기 평균값
+        private double _avgUnitVolume = 100_000.0; // 🔥 초기값을 현실적인 값으로
+        private int _snapshotCount = 0;            // 🔥 워밍업 카운터
+        private const int WarmupSnapshots = 5;     // 🔥 5회 워밍업 후 감지 시작
         #endregion
 
         #region [ 이벤트 ]
@@ -66,6 +68,8 @@ namespace Upbit_Manager.Core.Orderbook
 
         #endregion
 
+
+
         #region [ 공개 API ]
 
         /// <summary>
@@ -75,6 +79,7 @@ namespace Upbit_Manager.Core.Orderbook
         {
             lock (_lock)
             {
+                _snapshotCount++;              // 🔥 카운터 증가
                 UpdateAverageVolume(snapshot);
                 UpdateHeatmapCells(snapshot);
                 DetectLargeOrders(snapshot);
@@ -187,6 +192,8 @@ namespace Upbit_Manager.Core.Orderbook
 
         private void DetectLargeOrders(OrderbookSnapshot snapshot)
         {
+            if (_snapshotCount < WarmupSnapshots) return; // 🔥 워밍업 중 감지 스킵
+
             foreach (var unit in snapshot.Units)
             {
                 // 매도 대량 호가 감지

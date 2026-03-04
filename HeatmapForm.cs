@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Upbit_Manager.Core;
 using Upbit_Manager.Core.Orderbook;
 
 namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
@@ -120,8 +121,14 @@ namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
         /// </summary>
         public void PushSnapshot(OrderbookSnapshot snapshot)
         {
-            // 엔진은 이미 MainController에서 ProcessSnapshot 완료된 상태
-            // (엔진 공유이므로 여기서는 계산만 요청)
+            // 🔥 엔진에 직접 처리 (MainController에서 안 하므로 여기서)
+            _engine.ProcessSnapshot(snapshot);
+
+            // 🔥 진단
+            var cells = _engine.GetCells();
+            if (cells.Count > 0)
+                Logger.Log($"[Heatmap] 셀 수: {cells.Count}");
+
             RequestBackgroundCalc();
         }
 
@@ -260,7 +267,9 @@ namespace Upbit_Manager   // ✅ 루트 네임스페이스 (Form1과 동일)
             // Y축 자동 스케일 (가격 범위에 맞게)
             plot.Axes.SetLimitsY(payload.YMin, payload.YMax);
 
-            _formsPlot.Refresh();
+            // 🔥 Visible일 때만 화면 갱신
+            if (Visible)
+                _formsPlot.Refresh();
         }
 
         #endregion
