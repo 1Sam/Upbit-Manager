@@ -121,6 +121,7 @@ namespace Upbit_Manager
             plot.FigureBackground.Color = ScottPlot.Color.FromHex("#1e1e1e");
             plot.DataBackground.Color = ScottPlot.Color.FromHex("#252526");
             plot.Axes.Color(ScottPlot.Color.FromHex("#d4d4d4"));
+
         }
 
         #endregion
@@ -232,9 +233,18 @@ namespace Upbit_Manager
 
                 data[row, col] = cell.State switch
                 {
+
+                    // 체결된 흔적은 아주 밝은 '하늘색' 계열로 인지되도록 높은 값 부여
                     HeatmapCellState.FilledAndGone => 1.5,
+
+                    // 스푸핑 의심은 '가장 밝은' 값으로 고정
                     HeatmapCellState.SpoofingSuspect => 2.0,
+
+                    // 일반 물량은 0.0 ~ 1.0 사이 (검정~흰색)
                     _ => Math.Clamp(cell.Volume / maxVol, 0.05, 0.99)
+                    //HeatmapCellState.FilledAndGone => 1.5,
+                    //HeatmapCellState.SpoofingSuspect => 2.0,
+                    //_ => Math.Clamp(cell.Volume / maxVol, 0.05, 0.99)
                 };
             }
 
@@ -293,7 +303,21 @@ namespace Upbit_Manager
                 payload.YMin,
                 payload.YMax);
 
-            _heatmapPlottable.Colormap = new ScottPlot.Colormaps.Viridis();
+            //기존 보라색에 배경에서 아래의 눈에 잘 띄는 색상으로 변경
+            //_heatmapPlottable.Colormap = new ScottPlot.Colormaps.Viridis();
+
+            // TryRender 메서드 내부 수정
+            var colorList = new ScottPlot.Color[]
+            {
+                ScottPlot.Color.FromHex("#000000"), // 물량 없음: 검정
+                ScottPlot.Color.FromHex("#444444"), // 아주 적은 물량: 짙은 회색
+                ScottPlot.Color.FromHex("#0077FF"), // 중간 물량: 파랑
+                ScottPlot.Color.FromHex("#FFFFFF")  // 대량 물량(벽): 흰색 (가장 눈에 띔)
+            };
+
+            _heatmapPlottable.Colormap = new ScottPlot.Colormaps.Custom(colorList);
+
+
             _heatmapPlottable.FlipVertically = false;
 
             if (!_userManualZoom)

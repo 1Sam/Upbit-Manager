@@ -10,6 +10,8 @@ namespace Upbit_Manager.Core
     /// </summary>
     public static class Logger
     {
+        public static bool isPaused = false;
+
         public static event Action<string>? OnLogAdded;
 
         // ⭐ 경로 변경: 내 문서/Upbit_Manager
@@ -25,6 +27,24 @@ namespace Upbit_Manager.Core
 
         public static void Log(string message, string level = "INFO")
         {
+            // 1. '시퀀스'이 포함되면 무시 모드 돌입
+            if (message.Contains("시퀀스"))
+            {
+                isPaused = true;
+                return; // 이후 로직 무시
+            }
+
+            // 2. '렌더링 시작'가 포함되면 다시 작동 모드로 복귀
+            if (message.Contains("렌더링 시작"))
+            {
+                isPaused = false;
+            }
+
+            // 3. 일시정지 상태라면 아래 로직들을 실행하지 않음
+            if (isPaused) return;
+
+
+
             string logTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
             string cleanMessage = message.Replace(Environment.NewLine, " ").Replace("\n", " ");
             string pureMessage = $"[{logTime}] [{level}] {cleanMessage}";
