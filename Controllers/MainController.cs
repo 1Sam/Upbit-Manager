@@ -1,6 +1,6 @@
 // ✅ [수정] Controllers/MainController.cs
-// 🔥 OnHeatmapHistorySnapshot, OnHeatmapHistoryCompleted 이벤트 추가
-// 🔥 RegisterMMFEvents()에 히스토리 이벤트 연결
+// 🔥 OnCandleSeriesChanged 이벤트 추가 (마켓 변경 시 HeatmapForm에 캔들 시리즈 전달)
+// ── 원본 코드 변경 없음, 추가만 함 ──
 
 using ScottPlot;
 using System;
@@ -34,10 +34,13 @@ namespace Upbit_Manager.Controllers
         public Action<double, double>? OnVolumeStatsUpdated;
         public Action<bool>? OnMMFStatusChanged;
 
-        // 🔥 히트맵 이벤트
-        public Action<OrderbookSnapshot>? OnHeatmapSnapshot;          // 실시간
-        public Action<OrderbookSnapshot>? OnHeatmapHistorySnapshot;   // 🔥 히스토리 배치
-        public Action? OnHeatmapHistoryCompleted;  // 🔥 히스토리 소진 완료
+        // 히트맵 이벤트
+        public Action<OrderbookSnapshot>? OnHeatmapSnapshot;
+        public Action<OrderbookSnapshot>? OnHeatmapHistorySnapshot;
+        public Action? OnHeatmapHistoryCompleted;
+
+        // 🔥 캔들 시리즈 변경 이벤트 (마켓 변경 시 HeatmapForm에 전달)
+        public Action<UpbitCandleSeries?, string>? OnCandleSeriesChanged;
 
         #endregion
 
@@ -139,7 +142,7 @@ namespace Upbit_Manager.Controllers
                 OnHeatmapSnapshot?.Invoke(snapshot);
             };
 
-            // 🔥 히스토리 배치 (렌더링 스킵용)
+            // 히스토리 배치 (렌더링 스킵용)
             _mmfBridge.OnHistorySnapshotReceived += (timestamp, units) =>
             {
                 if (units.Length == 0) return;
@@ -148,7 +151,7 @@ namespace Upbit_Manager.Controllers
                 OnHeatmapHistorySnapshot?.Invoke(snapshot);
             };
 
-            // 🔥 히스토리 소진 완료
+            // 히스토리 소진 완료
             _mmfBridge.OnHistoryLoadCompleted += () =>
             {
                 OnHeatmapHistoryCompleted?.Invoke();
@@ -219,6 +222,12 @@ namespace Upbit_Manager.Controllers
             _chartManager.InitializeWithData(_selectedMarket, candles, null, usdtHistory);
             _currentUpbitCandleSeries =
                 _chartManager.GetSeries<UpbitCandleSeries>(ExchangeSource.Upbit, SeriesType.Candle);
+
+            // 🔥 마켓 변경 시 HeatmapForm에 캔들 시리즈 및 마켓 전달
+            if (_currentUpbitCandleSeries != null)
+                _currentUpbitCandleSeries.Market = _selectedMarket;
+
+            OnCandleSeriesChanged?.Invoke(_currentUpbitCandleSeries, _selectedMarket);
 
             double avgPrice = _accountManager.GetAvgBuyPrice(_selectedMarket);
             if (avgPrice > 0)

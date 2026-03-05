@@ -1,5 +1,6 @@
 ﻿// ✅ [수정] Form1.cs
-// 🔥 OnHeatmapHistorySnapshot, OnHeatmapHistoryCompleted 이벤트 연결 추가
+// 🔥 OnCandleSeriesChanged 이벤트 연결 추가
+//    → 마켓 변경 시 HeatmapForm.SetCandleOverlay() 호출
 
 using ScottPlot.WinForms;
 using System;
@@ -121,6 +122,12 @@ namespace Upbit_Manager
             // 🔥 히스토리 소진 완료 → 렌더링 1회 트리거
             _controller.OnHeatmapHistoryCompleted = () =>
                 _heatmapForm?.OnHistoryCompleted();
+
+            // 🔥 마켓 변경 시 캔들 시리즈 전달
+            // ADA 마켓 → 캔들 오버레이 활성화 가능
+            // 다른 마켓 → 캔들 오버레이 자동 OFF
+            _controller.OnCandleSeriesChanged = (series, market) =>
+                _heatmapForm?.SetCandleOverlay(series, market);
 
             // 8. 프로그램 초기화
             InitProgram();
@@ -458,7 +465,6 @@ namespace Upbit_Manager
             string statusText = toolStripStatusLabel1.Text;
             var match = System.Text.RegularExpressions.Regex.Match(
                 statusText, @"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}");
-
             if (!match.Success) return;
 
             Clipboard.SetText(match.Value);
