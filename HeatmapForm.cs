@@ -1,12 +1,7 @@
 ﻿// ✅ [수정] HeatmapForm.cs
-// 🔥 컬러맵 재설계: 색약 친화 + 타이틀(Yellow/White/Green/Red) 일치
-//    값 구간:
-//      0.00 ~ 0.60  → 검정~파랑   (일반 물량 얇음~두꺼움)
-//      0.61 ~ 0.89  → 파랑~노랑   (대량 호가 Active: Yellow)
-//      0.90 ~ 0.94  → 흰색        (최대 호가 벽: White)
-//      0.95 ~ 0.97  → 초록        (체결/소멸: Green = FilledAndGone)
-//      0.98 ~ 1.00  → 빨강        (스푸핑 의심: Red = SpoofingSuspect)
-// 🔥 캔들 오버레이 토글 유지
+// 🔥 자동 스크롤 ON 시 Y축 위치(중심) + 크기(span) 모두 유지
+//    → 수동으로 확대/이동한 상태 그대로, X축 우측만 현재시각에 붙음
+//    → yMid를 payload 기준이 아닌 현재 축 limits에서 읽어옴
 
 using ScottPlot;
 using ScottPlot.Plottables;
@@ -40,9 +35,22 @@ namespace Upbit_Manager
         private bool _isCalculating = false;
         private bool _calcRequested = false;
 
-        private ScottPlot.Plottables.Heatmap? _heatmapPlottable;
+        // 레이어 1: 일반 물량 히트맵
+        private ScottPlot.Plottables.Heatmap? _volumeHeatmap = null;
+        // 레이어 2: FilledAndGone(초록) + Spoofing(빨강) 오버레이
+        private ScottPlot.Plottables.Heatmap? _stateOverlay = null;
 
-        private bool _userManualZoom = false;
+        // 🔥 자동 스크롤 ON/OFF
+        private bool _autoScroll = true;
+
+        // 🔥 사용자가 수동 조작 후 저장된 축 상태
+        //    - _savedYMin / _savedYMax : 마지막으로 저장된 Y축 범위
+        //    - _savedXSpan             : 마지막으로 저장된 X축 폭(시간 범위 크기)
+        //    - 0 이면 아직 저장 안 됨 → 자동 스크롤 시 기본값 사용
+        private double _savedYMin = 0;
+        private double _savedYMax = 0;
+        private double _savedXSpan = 0; // 🔥 X축 시간 폭 (OADate 단위)
+
         private volatile bool _isLoadingHistory = false;
 
         // ── 캔들 오버레이 ─────────────────────────────────────────
@@ -52,28 +60,41 @@ namespace Upbit_Manager
         private string _heatmapMarket = "KRW-ADA";
         private bool _candleOverlayOn = false;
 
+        // 툴바 버튼
         private ToolStrip? _toolStrip;
         private ToolStripButton? _btnCandleToggle;
+        private ToolStripButton? _btnAutoScroll;   // 자동 스크롤 버튼
+        private ToolStripButton? _btnManualFix;    // 수동 고정 버튼
 
-        // 🔥 색약 친화 커스텀 컬러맵 (0.0~1.0 전체 범위 커버)
-        //    검정 → 파랑 → 노랑(Active) → 흰색(Wall) → 초록(Filled) → 빨강(Spoofing)
-        private static readonly ScottPlot.Color[] HeatmapColors = new[]
+        // ── 컬러맵 정의 ───────────────────────────────────────────
+
+        // 레이어 1 컬러맵: 물량 전용 (검정→파랑→노랑→흰색)
+        // 초록/빨강 없음 → 물량이 아무리 많아도 흰색이 최대
+        private static readonly ScottPlot.Color[] VolumeColors = new[]
         {
-            ScottPlot.Color.FromHex("#000000"),  // 0.00  물량 없음: 검정
-            ScottPlot.Color.FromHex("#0a0a2a"),  // 0.07  아주 적음
-            ScottPlot.Color.FromHex("#0033AA"),  // 0.14  적은 물량: 진한 파랑
-            ScottPlot.Color.FromHex("#0055FF"),  // 0.21  중간 물량: 파랑
-            ScottPlot.Color.FromHex("#0099FF"),  // 0.29  중상 물량: 하늘색
-            ScottPlot.Color.FromHex("#00CCFF"),  // 0.36  두꺼운 물량: 밝은 하늘
-            ScottPlot.Color.FromHex("#FFCC00"),  // 0.43  대량 호가 시작: 노랑 (Active Yellow)
-            ScottPlot.Color.FromHex("#FFDD44"),  // 0.50  대량 호가: 밝은 노랑
-            ScottPlot.Color.FromHex("#FFEE88"),  // 0.57  대량 호가 강: 연노랑
-            ScottPlot.Color.FromHex("#FFFFFF"),  // 0.64  최대 호가 벽: 흰색 (Active White)
-            ScottPlot.Color.FromHex("#FFFFFF"),  // 0.71  흰색 유지
-            ScottPlot.Color.FromHex("#AAFFAA"),  // 0.79  체결 시작: 연초록
-            ScottPlot.Color.FromHex("#00FF66"),  // 0.86  체결/소멸: 초록 (FilledAndGone Green)
-            ScottPlot.Color.FromHex("#FF4444"),  // 0.93  스푸핑 시작: 빨강 (Spoofing Red)
-            ScottPlot.Color.FromHex("#FF0000"),  // 1.00  스푸핑 강: 진한 빨강
+            ScottPlot.Color.FromHex("#000000"),  // 0/8  물량 없음: 검정
+            ScottPlot.Color.FromHex("#001166"),  // 1/8  아주 적음: 짙은 남색
+            ScottPlot.Color.FromHex("#0033AA"),  // 2/8  적음: 진한 파랑
+            ScottPlot.Color.FromHex("#0066FF"),  // 3/8  중간: 파랑
+            ScottPlot.Color.FromHex("#00AAFF"),  // 4/8  중상: 하늘색
+            ScottPlot.Color.FromHex("#FFCC00"),  // 5/8  대량 시작: 노랑 (Active Yellow)
+            ScottPlot.Color.FromHex("#FFEE66"),  // 6/8  대량: 밝은 노랑
+            ScottPlot.Color.FromHex("#FFFFFF"),  // 7/8  최대 벽: 흰색 (Active White)
+            ScottPlot.Color.FromHex("#FFFFFF"),  // 8/8  흰색 유지
+        };
+
+        // 레이어 2 컬러맵: 특수 상태 전용
+        // 0.0 = 투명 → 레이어 1이 그대로 보임
+        // 0.45 = 초록 (FilledAndGone)
+        // 0.90 = 빨강 (Spoofing)
+        private static readonly ScottPlot.Color[] StateColors = new[]
+        {
+            ScottPlot.Color.FromHex("#000000").WithAlpha(0),   // 0.0  투명 (일반 셀)
+            ScottPlot.Color.FromHex("#000000").WithAlpha(0),   // 0.2  투명 유지
+            ScottPlot.Color.FromHex("#00FF66").WithAlpha(200), // 0.4  체결/소멸: 초록 (FilledAndGone)
+            ScottPlot.Color.FromHex("#00DD44").WithAlpha(220), // 0.6  초록 유지
+            ScottPlot.Color.FromHex("#FF2222").WithAlpha(220), // 0.8  스푸핑: 빨강 (Spoofing)
+            ScottPlot.Color.FromHex("#FF0000").WithAlpha(255), // 1.0  스푸핑 강: 진한 빨강
         };
 
         #endregion
@@ -93,6 +114,7 @@ namespace Upbit_Manager
             // ── 툴바 ──────────────────────────────────────────────
             _toolStrip = new ToolStrip { Dock = DockStyle.Top };
 
+            // 캔들 토글 버튼
             _btnCandleToggle = new ToolStripButton("캔들 OFF")
             {
                 CheckOnClick = true,
@@ -103,6 +125,30 @@ namespace Upbit_Manager
             };
             _btnCandleToggle.CheckedChanged += OnCandleToggleChanged;
             _toolStrip.Items.Add(_btnCandleToggle);
+
+            _toolStrip.Items.Add(new ToolStripSeparator());
+
+            // 🔥 자동 스크롤 버튼 (기본 활성, 초록 강조)
+            _btnAutoScroll = new ToolStripButton("▶ 자동 스크롤")
+            {
+                BackColor = System.Drawing.Color.FromArgb(0, 100, 0),  // 진한 초록 배경
+                ForeColor = System.Drawing.Color.White,
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                Font = new System.Drawing.Font("Segoe UI", 9f, System.Drawing.FontStyle.Bold)
+            };
+            _btnAutoScroll.Click += (_, _) => OnAutoScrollClicked();
+            _toolStrip.Items.Add(_btnAutoScroll);
+
+            // 🔥 수동 고정 버튼 (기본 비활성, 흐린 색)
+            _btnManualFix = new ToolStripButton("⏸ 수동 고정")
+            {
+                BackColor = System.Drawing.Color.FromArgb(45, 45, 48),
+                ForeColor = System.Drawing.Color.Gray,
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                Font = new System.Drawing.Font("Segoe UI", 9f, System.Drawing.FontStyle.Regular)
+            };
+            _btnManualFix.Click += (_, _) => OnManualFixClicked();
+            _toolStrip.Items.Add(_btnManualFix);
 
             // ── FormsPlot ─────────────────────────────────────────
             _formsPlot = new FormsPlot { Dock = DockStyle.Fill };
@@ -122,21 +168,110 @@ namespace Upbit_Manager
                 Hide();
             };
 
+            // 우클릭 → 자동 스크롤 ON 복귀 (Y축 저장값 유지)
             _formsPlot.MouseClick += (_, e) =>
             {
                 if (e.Button == MouseButtons.Right)
                 {
-                    _userManualZoom = false;
+                    SetAutoScroll(true);
                     lock (_resultLock) { if (_pending != null) _hasNew = true; }
                 }
             };
 
+            // 🔥 마우스 드래그/휠 → 현재 Y축 범위 저장 후 자동 스크롤 OFF
             _formsPlot.MouseMove += (_, e) =>
             {
                 if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Middle)
-                    _userManualZoom = true;
+                {
+                    SaveCurrentAxisLimits();
+                    SetAutoScroll(false);
+                }
             };
-            _formsPlot.MouseWheel += (_, _) => _userManualZoom = true;
+            _formsPlot.MouseWheel += (_, _) =>
+            {
+                SaveCurrentAxisLimits();
+                SetAutoScroll(false);
+            };
+        }
+
+        #endregion
+
+        #region [ 자동 스크롤 제어 ]
+
+        /// <summary>
+        /// 🔥 현재 X/Y축 범위를 모두 저장.
+        ///    Y축: min/max 그대로 보존 (위치 + 크기)
+        ///    X축: span(폭)만 보존 → 자동 스크롤 시 이 폭 유지하며 우측을 현재시각에 붙임
+        /// </summary>
+        private void SaveCurrentAxisLimits()
+        {
+            var limits = _formsPlot.Plot.Axes.GetLimits();
+
+            if (limits.Top > limits.Bottom)
+            {
+                _savedYMin = limits.Bottom;
+                _savedYMax = limits.Top;
+            }
+
+            double xSpan = limits.Right - limits.Left;
+            if (xSpan > 0)
+                _savedXSpan = xSpan;
+        }
+
+        /// <summary>
+        /// 🔥 [자동 스크롤] 버튼 클릭
+        ///    X축 우측을 현재 시각에 붙이며 저장된 X/Y span 유지
+        /// </summary>
+        private void OnAutoScrollClicked()
+        {
+            SetAutoScroll(true);
+            lock (_resultLock) { if (_pending != null) _hasNew = true; }
+        }
+
+        /// <summary>
+        /// 🔥 [수동 고정] 버튼 클릭
+        ///    현재 뷰를 그대로 저장하고 자동 스크롤 중단
+        /// </summary>
+        private void OnManualFixClicked()
+        {
+            SaveCurrentAxisLimits();
+            SetAutoScroll(false);
+        }
+
+        /// <summary>
+        /// 자동 스크롤 상태 변경 + 두 버튼 UI 동기화
+        /// ON  → [자동 스크롤] 강조(초록),  [수동 고정] 흐림
+        /// OFF → [자동 스크롤] 흐림,         [수동 고정] 강조(주황)
+        /// </summary>
+        private void SetAutoScroll(bool on)
+        {
+            _autoScroll = on;
+
+            if (_btnAutoScroll != null)
+            {
+                _btnAutoScroll.BackColor = on
+                    ? System.Drawing.Color.FromArgb(0, 100, 0)       // 활성: 진한 초록
+                    : System.Drawing.Color.FromArgb(45, 45, 48);     // 비활성: 기본 배경
+                _btnAutoScroll.ForeColor = on
+                    ? System.Drawing.Color.White
+                    : System.Drawing.Color.Gray;
+                _btnAutoScroll.Font = new System.Drawing.Font(
+                    "Segoe UI", 9f,
+                    on ? System.Drawing.FontStyle.Bold : System.Drawing.FontStyle.Regular);
+            }
+
+            if (_btnManualFix != null)
+            {
+                _btnManualFix.BackColor = on
+                    ? System.Drawing.Color.FromArgb(45, 45, 48)      // 비활성: 기본 배경
+                    : System.Drawing.Color.FromArgb(140, 70, 0);     // 활성: 진한 주황
+                _btnManualFix.ForeColor = on
+                    ? System.Drawing.Color.Gray
+                    : System.Drawing.Color.White;
+                _btnManualFix.Font = new System.Drawing.Font(
+                    "Segoe UI", 9f,
+                    on ? System.Drawing.FontStyle.Regular : System.Drawing.FontStyle.Bold);
+            }
         }
 
         #endregion
@@ -147,7 +282,6 @@ namespace Upbit_Manager
         {
             var plot = _formsPlot.Plot;
 
-            // 🔥 타이틀과 컬러맵 일치
             plot.Title("Orderbook Heatmap  |  Yellow/White: Active Orders  |  Green: Filled/Expired  |  Red: Spoofing Suspected");
             plot.XLabel("Time");
             plot.YLabel("Price (KRW)");
@@ -364,34 +498,36 @@ namespace Upbit_Manager
             var timeIdx = timeKeys.Select((v, i) => (v, i)).ToDictionary(x => x.v, x => x.i);
             var priceIdx = priceKeys.Select((v, i) => (v, i)).ToDictionary(x => x.v, x => x.i);
 
-            double maxVol = cells.Max(c => c.Volume);
-            if (maxVol <= 0) return null;
+            double maxVol = cells.Where(c => c.State == HeatmapCellState.Active)
+                                 .Select(c => c.Volume)
+                                 .DefaultIfEmpty(1.0)
+                                 .Max();
 
-            var data = new double[nPrice, nTime];
+            var volumeData = new double[nPrice, nTime];
+            var stateData = new double[nPrice, nTime];
 
             foreach (var cell in cells)
             {
                 int col = timeIdx[cell.TimeOA];
                 int row = priceIdx[cell.Price];
 
-                // 🔥 모든 값을 0.0~1.0 범위 안에 배치
-                //    컬러맵 구간:
-                //      0.00~0.59  검정~하늘 (일반 물량)
-                //      0.60~0.89  노랑~흰색 (대량 호가 Active)
-                //      0.90~0.94  초록      (체결/소멸 FilledAndGone)
-                //      0.95~1.00  빨강      (스푸핑 SpoofingSuspect)
-                data[row, col] = cell.State switch
+                switch (cell.State)
                 {
-                    HeatmapCellState.FilledAndGone => 0.92, // 🟢 초록 구간
-                    HeatmapCellState.SpoofingSuspect => 0.98, // 🔴 빨강 구간
-                    _ => cell.Volume / maxVol switch
-                    {
-                        // 일반 물량: 0.0~0.59 (검정~하늘)
-                        var r when r < 0.7 => Math.Clamp(r * 0.59 / 0.7, 0.02, 0.59),
-                        // 대량 물량: 0.60~0.89 (노랑~흰색)
-                        var r => Math.Clamp(0.60 + (r - 0.7) / 0.3 * 0.29, 0.60, 0.89)
-                    }
-                };
+                    case HeatmapCellState.Active:
+                        volumeData[row, col] = Math.Clamp(cell.Volume / maxVol, 0.05, 1.0);
+                        stateData[row, col] = 0.0;
+                        break;
+
+                    case HeatmapCellState.FilledAndGone:
+                        volumeData[row, col] = 0.0;
+                        stateData[row, col] = 0.45;
+                        break;
+
+                    case HeatmapCellState.SpoofingSuspect:
+                        volumeData[row, col] = 0.0;
+                        stateData[row, col] = 0.90;
+                        break;
+                }
             }
 
             double halfT = TimeSpan.FromSeconds(_engine.TimeBucketSeconds / 2.0).TotalDays;
@@ -399,7 +535,8 @@ namespace Upbit_Manager
 
             return new RenderPayload
             {
-                Data = data,
+                VolumeData = volumeData,
+                StateData = stateData,
                 XMin = timeKeys.First() - halfT,
                 XMax = timeKeys.Last() + halfT,
                 YMin = priceKeys.First() - halfP,
@@ -428,46 +565,87 @@ namespace Upbit_Manager
 
             if (payload == null)
             {
-                if (_heatmapPlottable != null)
-                {
-                    plot.Remove(_heatmapPlottable);
-                    _heatmapPlottable = null;
-                }
+                RemoveHeatmapLayers();
                 RemoveCandleOverlay();
                 if (Visible) _formsPlot.Refresh();
                 return;
             }
 
-            // ── 히트맵 갱신 ────────────────────────────────────────
-            if (_heatmapPlottable != null)
-                plot.Remove(_heatmapPlottable);
+            // ── 레이어 1: 물량 히트맵 ──────────────────────────────
+            if (_volumeHeatmap != null)
+                plot.Remove(_volumeHeatmap);
 
-            _heatmapPlottable = plot.Add.Heatmap(payload.Data);
-            _heatmapPlottable.Position = new CoordinateRect(
-                payload.XMin,
-                payload.XMax,
-                payload.YMin,
-                payload.YMax);
+            _volumeHeatmap = plot.Add.Heatmap(payload.VolumeData);
+            _volumeHeatmap.Position = new CoordinateRect(
+                payload.XMin, payload.XMax,
+                payload.YMin, payload.YMax);
+            _volumeHeatmap.Colormap = new ScottPlot.Colormaps.Custom(VolumeColors);
+            // row[0]이 최하단 가격 → Y축 방향 논리 일치
+            _volumeHeatmap.FlipVertically = true;
 
-            // 🔥 커스텀 컬러맵 적용 (색약 친화 + 타이틀 일치)
-            _heatmapPlottable.Colormap = new ScottPlot.Colormaps.Custom(HeatmapColors);
-            _heatmapPlottable.FlipVertically = false;
+            // ── 레이어 2: 특수 상태 오버레이 ──────────────────────
+            if (_stateOverlay != null)
+                plot.Remove(_stateOverlay);
 
-            // 🔥 캔들 오버레이 (히트맵 위에 렌더링)
+            _stateOverlay = plot.Add.Heatmap(payload.StateData);
+            _stateOverlay.Position = new CoordinateRect(
+                payload.XMin, payload.XMax,
+                payload.YMin, payload.YMax);
+            _stateOverlay.Colormap = new ScottPlot.Colormaps.Custom(StateColors);
+            _stateOverlay.FlipVertically = true;
+
+            // ── 캔들 오버레이 (최상단) ─────────────────────────────
             RenderCandleOverlay();
 
             // ── X/Y 축 자동 스크롤 ─────────────────────────────────
-            if (!_userManualZoom)
+            if (_autoScroll)
             {
                 double now = DateTime.Now.ToOADate();
-                double xPadding = TimeSpan.FromMinutes(1).TotalDays;
-                double xLeft = now - TimeSpan.FromHours(6).TotalDays;
-                double xMin = Math.Min(payload.XMin, xLeft);
-                plot.Axes.SetLimitsX(xMin, now + xPadding);
-                plot.Axes.SetLimitsY(payload.YMin - 2, payload.YMax + 2);
+                double xPadding = TimeSpan.FromSeconds(30).TotalDays; // 우측 1틱 여유
+
+                // 🔥 X축: 저장된 span이 있으면 그 폭 유지하며 우측을 현재시각에 붙임
+                //         없으면 기본 6시간 범위 표시
+                if (_savedXSpan > 0)
+                {
+                    // 사용자가 확대한 시간 폭 그대로, 우측 끝만 현재시각으로 이동
+                    plot.Axes.SetLimitsX(now + xPadding - _savedXSpan, now + xPadding);
+                }
+                else
+                {
+                    // 저장값 없음 → 기본 6시간 범위
+                    double xLeft = now - TimeSpan.FromHours(6).TotalDays;
+                    double xMin = Math.Min(payload.XMin, xLeft);
+                    plot.Axes.SetLimitsX(xMin, now + xPadding);
+                }
+
+                // 🔥 Y축: 저장된 위치+크기 그대로 복원, 없으면 전체 범위
+                if (_savedYMin != 0 || _savedYMax != 0)
+                {
+                    plot.Axes.SetLimitsY(_savedYMin, _savedYMax);
+                }
+                else
+                {
+                    plot.Axes.SetLimitsY(payload.YMin - 2, payload.YMax + 2);
+                }
             }
 
             if (Visible) _formsPlot.Refresh();
+        }
+
+        private void RemoveHeatmapLayers()
+        {
+            var plot = _formsPlot.Plot;
+
+            if (_volumeHeatmap != null)
+            {
+                plot.Remove(_volumeHeatmap);
+                _volumeHeatmap = null;
+            }
+            if (_stateOverlay != null)
+            {
+                plot.Remove(_stateOverlay);
+                _stateOverlay = null;
+            }
         }
 
         #endregion
@@ -476,7 +654,7 @@ namespace Upbit_Manager
 
         public void ForceRefresh()
         {
-            _userManualZoom = false;
+            SetAutoScroll(true);
             lock (_resultLock) { if (_pending != null) _hasNew = true; }
         }
 
@@ -486,7 +664,10 @@ namespace Upbit_Manager
 
         private sealed class RenderPayload
         {
-            public double[,] Data { get; init; } = new double[0, 0];
+            // 레이어 1: 일반 물량 (0.0~1.0, 검정~흰색)
+            public double[,] VolumeData { get; init; } = new double[0, 0];
+            // 레이어 2: 특수 상태 (0.0=투명, 0.45=초록, 0.90=빨강)
+            public double[,] StateData { get; init; } = new double[0, 0];
             public double XMin { get; init; }
             public double XMax { get; init; }
             public double YMin { get; init; }
